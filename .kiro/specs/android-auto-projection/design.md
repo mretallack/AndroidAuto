@@ -96,22 +96,51 @@ Manages the AA protocol state machine.
 - SERVICE_DISCOVERY → ACTIVE: Services exchanged, channels opening
 - ACTIVE → DISCONNECT: ByeBye or transport error
 
-### 3. Message Framing
+### 3. Message Framing (Validated against uglyoldbob/android-auto)
 
 ```
-┌──────────────────────────────────────────┐
-│            Frame Header (8 bytes)         │
-├──────┬──────┬──────────┬─────────────────┤
-│Chan  │Flags │ Length   │   Msg Type      │
-│(2B)  │(1B)  │ (2B)    │   (2B + 1B)     │
-├──────┴──────┴──────────┴─────────────────┤
-│              Payload (protobuf)           │
-└──────────────────────────────────────────┘
-
-Flags:
-  bit 0-1: Frame type (0=single, 1=first, 2=middle, 3=last)
-  bit 2:   Encrypted
+┌───────────────────────────────────────────────────┐
+│              Wire Frame                            │
+├──────────┬──────────┬──────────┬──────────────────┤
+│Channel ID│  Flags   │  Length  │    Payload       │
+│  (1 byte)│ (1 byte) │(2 bytes) │  (Length bytes)  │
+├──────────┴──────────┴──────────┴──────────────────┤
+│                                                    │
+│  Flags byte:                                       │
+│    bit 0-1: Frame type                             │
+│      0 = Middle (multi-frame continuation)         │
+│      1 = First (start of multi-frame)              │
+│      2 = Last (end of multi-frame)                 │
+│      3 = Single (complete in one frame)            │
+│    bit 2: Control flag (1=control msg, 0=specific) │
+│    bit 3: Encrypted (1=TLS encrypted)              │
+│                                                    │
+│  Payload structure:                                │
+│    [2 bytes msg_type BE] [protobuf body...]        │
+│                                                    │
+│  For First frame of multi-frame:                   │
+│    [2 bytes total_length] [4 bytes reserved]       │
+│    [payload...]                                    │
+│                                                    │
+│  Max single frame payload: 0x4000 (16KB)           │
+└───────────────────────────────────────────────────┘
 ```
+
+**Channel IDs (fixed ordering):**
+| ID | Channel | Direction (from phone perspective) |
+|----|---------|-----|
+| 0 | Control | Bidirectional |
+| 1 | Input | Receive (touch/keys from HU) |
+| 2 | Sensor | Send (GPS, night mode to HU) |
+| 3 | Video | Send (H.264 frames to HU) |
+| 4 | Media Audio | Send (music/nav audio to HU) |
+| 5 | Speech Audio | Send (voice audio to HU) |
+| 6 | System Audio | Send (system sounds to HU) |
+| 7 | AV Input | Receive (mic audio from HU) |
+| 8 | Bluetooth | Bidirectional |
+| 9 | Navigation | Send (turn-by-turn to HU) |
+
+**Protocol Version:** `(1, 1)` — major=1, minor=1
 
 ### 4. TLS Layer
 
@@ -402,26 +431,259 @@ app/
 - Protocol engine (version, TLS, service discovery)
 - Video channel (MediaProjection → H.264 → frames)
 - Basic touch input (tap only)
+- **Test:** Docker head unit emulator validates handshake + video frames
 
 ### Phase 2: Full Input + Audio
 - Multi-touch support
 - Key events (back, home, media)
 - Audio output capture
 - Microphone input routing
+- **Test:** Integration tests for all channel types
 
 ### Phase 3: Wireless + Polish
-- Bluetooth advertisement
-- WiFi transport
+- Bluetooth advertisement (UUID: AndroidAuto, channel 22)
+- WiFi transport (TCP on port 5277)
 - Sensor channel (GPS, night mode)
 - Connection reliability and reconnection
 - Settings UI
+- **Test:** End-to-end with headunit-revived on real hardware
+
+---
+
+## Protocol Validation Notes
+
+The following was validated against `uglyoldbob/android-auto` (Rust, LGPL-3.0) source code and protobuf definitions:
+
+### Confirmed correct in our design:
+- ✅ Phone acts as TLS server, head unit is TLS client
+- ✅ TLS 1.2 with self-signed certificates (server cert verification is disabled — accepts any)
+- ✅ Protocol uses protobuf for message encoding
+- ✅ Messages have 2-byte type prefix (big-endian) before protobuf body
+- ✅ Video codecs: H.264 BP, H.265, VP9, AV1
+- ✅ Audio: 48kHz stereo PCM, 16kHz mono for speech
+- ✅ Sensor types match (location, night mode, driving status, etc.)
+- ✅ Touch events include pointer_id for multi-touch
+- ✅ Shutdown/ByeBye is a clean request/response pair
+- ✅ Ping uses microsecond timestamps since UNIX epoch
+
+### Corrections applied from validation:
+- ❌→✅ Frame header is 4 bytes (1 chan + 1 flags + 2 length), NOT 8 bytes
+- ❌→✅ Frame type encoding: Middle=0, First=1, Last=2, Single=3 (not 0,1,2,3 as we had)
+- ❌→✅ Channel IDs are sequential u8 starting at 0, assigned by order in ServiceDiscoveryResponse
+- ❌→✅ Protocol version is (1,1) not (1,7)
+- ❌→✅ Max frame payload is 0x4000 (16KB)
+- ❌→✅ First frame of multi-frame has 6-byte prefix (2 length + 4 reserved) before payload
+- ❌→✅ Bluetooth RFCOMM uses UUID `AndroidAuto` on channel 22 for wireless discovery
+- ❌→✅ WiFi connection uses TCP (not UDP)
+
+### Key protocol details from source:
+- `ServiceDiscoveryResponse` contains `HeadUnitInfo` (name, car model, year, serial, manufacturer, etc.)
+- `ServiceDiscoveryRequest` from phone contains only `device_name` and `device_brand`
+- Video focus must be requested/granted before video frames are sent
+- AV channels use ACK-based flow control (`max_unacked` in setup response)
+- Audio input (mic from HU) uses `AVInputOpenRequest` with `open`, `anc`, `ec` fields
+- Navigation channel supports turn events, distance events, and status updates
 
 ---
 
 ## Dependencies on External Protocol Definitions
 
 We will use the protobuf definitions from `uglyoldbob/android-auto` (LGPL-3.0) as our starting point:
-- `protobuf/Wifi.proto` — main protocol messages
-- `protobuf/Bluetooth.proto` — wireless handoff messages
+- `protobuf/Wifi.proto` — main protocol messages (all control, AV, input, sensor, navigation messages)
+- `protobuf/Bluetooth.proto` — wireless handoff messages (socket info, network info)
 
 These define all message types, channel structures, and configuration formats needed for the protocol implementation.
+
+---
+
+## Testing Strategy
+
+### Overview
+
+Testing is split into four layers: unit tests, integration tests with a Docker-based head unit emulator, protocol conformance tests, and on-device testing.
+
+### 1. Unit Tests
+
+Standard Kotlin unit tests for pure logic:
+
+```
+src/test/kotlin/org/openandroidauto/
+├── protocol/
+│   ├── MessageFramerTest.kt      # Frame encode/decode, fragmentation
+│   ├── ProtocolEngineTest.kt     # State machine transitions
+│   └── TlsServerTest.kt         # Certificate generation, handshake
+├── channel/
+│   ├── VideoChannelTest.kt       # Config negotiation, frame packaging
+│   ├── SensorChannelTest.kt      # Sensor message formatting
+│   └── InputChannelTest.kt       # Touch coordinate mapping
+└── transport/
+    └── MockTransportTest.kt      # Transport interface contract
+```
+
+**Key unit test areas:**
+- Frame serialization/deserialization (round-trip)
+- Multi-frame fragmentation and reassembly
+- Protobuf message encoding matches expected wire format
+- Protocol state machine rejects invalid transitions
+- Touch coordinate scaling calculations
+- Video config negotiation logic
+
+### 2. Integration Tests with Docker Head Unit
+
+Use `uglyoldbob/android-auto` (Rust) as a head unit emulator running in Docker. This gives us a real protocol peer to test against.
+
+```yaml
+# docker-compose.test.yml
+services:
+  headunit-emulator:
+    build:
+      context: ./test/headunit-emulator
+      dockerfile: Dockerfile
+    ports:
+      - "5277:5277"  # AA WiFi port
+    environment:
+      - RUST_LOG=debug
+```
+
+```dockerfile
+# test/headunit-emulator/Dockerfile
+FROM rust:1.77-slim
+RUN apt-get update && apt-get install -y \
+    protobuf-compiler libssl-dev pkg-config
+WORKDIR /app
+RUN git clone https://github.com/uglyoldbob/android-auto.git .
+RUN cargo build --release --features wireless
+# Run as a headunit that connects via WiFi
+CMD ["cargo", "run", "--example", "main", "--release", "--features", "wireless"]
+```
+
+**Integration test scenarios:**
+
+| Test | Description | Validates |
+|------|-------------|-----------|
+| `test_version_handshake` | Connect, exchange VERSION_REQUEST/RESPONSE | FR-2 |
+| `test_tls_handshake` | Complete TLS negotiation with emulator | FR-3 |
+| `test_service_discovery` | Exchange service capabilities | FR-4 |
+| `test_channel_open_video` | Open video channel, verify response | FR-5 |
+| `test_send_video_frame` | Send H.264 NAL unit, verify ACK | FR-9 |
+| `test_receive_touch` | HU sends touch, verify phone receives | FR-13 |
+| `test_ping_pong` | Verify keepalive works | FR-18 |
+| `test_shutdown` | Graceful disconnect sequence | FR-19 |
+| `test_multi_frame` | Send >16KB payload, verify reassembly | FR-20 |
+| `test_audio_channel` | Open audio, send PCM data | FR-10 |
+| `test_sensor_data` | Send GPS location, verify receipt | FR-16 |
+
+**Test execution:**
+```bash
+# Start the head unit emulator
+docker compose -f docker-compose.test.yml up -d
+
+# Run integration tests (connects to emulator via WiFi/TCP)
+./gradlew connectedAndroidTest -Ptest.headunit.host=localhost -Ptest.headunit.port=5277
+```
+
+### 3. Protocol Conformance Tests
+
+Standalone tests that validate our protocol implementation against captured traffic from the real Google AA app. These run without a head unit.
+
+```kotlin
+class ProtocolConformanceTest {
+    // Replay captured USB traffic from real AA session
+    // Verify our implementation produces identical responses
+    
+    @Test
+    fun `version response matches real AA app`() {
+        val captured = loadCapture("captures/version_exchange.bin")
+        val ourResponse = protocolEngine.handleVersionRequest(captured.request)
+        assertEquals(captured.response, ourResponse)
+    }
+    
+    @Test
+    fun `service discovery response has correct channel descriptors`() {
+        val response = protocolEngine.buildServiceDiscoveryResponse()
+        // Verify all required channels are advertised
+        assertTrue(response.channels.any { it.hasAvChannel() && it.avChannel.streamType == VIDEO })
+        assertTrue(response.channels.any { it.hasSensorChannel() })
+        assertTrue(response.channels.any { it.hasInputChannel() })
+    }
+}
+```
+
+**Capture methodology:**
+- Use `headunit-revived` in self-mode with USB logging enabled
+- Capture raw USB traffic with `usbmon` / Wireshark
+- Store as binary fixtures in `test/fixtures/captures/`
+
+### 4. On-Device Testing
+
+For testing the full pipeline on a real Android device:
+
+```kotlin
+// Instrumented tests (src/androidTest/)
+class ProjectionServiceTest {
+    @Test
+    fun `MediaProjection starts and produces frames`() {
+        // Requires user interaction to grant permission
+        // Use UiAutomator to tap "Allow"
+    }
+    
+    @Test
+    fun `MediaCodec encodes H264 baseline profile`() {
+        // Feed synthetic frames, verify NAL unit output
+    }
+    
+    @Test
+    fun `AudioPlaybackCapture produces PCM data`() {
+        // Play a tone, verify capture produces non-zero samples
+    }
+}
+```
+
+### 5. End-to-End Test with headunit-revived
+
+For full system validation, use `headunit-revived` (the Android head unit app) on a second device or emulator:
+
+```
+┌─────────────┐     USB/WiFi      ┌──────────────────┐
+│  Our App    │◄──────────────────▶│ headunit-revived │
+│  (Phone)    │                    │ (Tablet/Emulator)│
+└─────────────┘                    └──────────────────┘
+```
+
+**Manual test checklist:**
+- [ ] Video appears on head unit within 5 seconds
+- [ ] Touch on head unit controls phone
+- [ ] Audio plays through head unit
+- [ ] Disconnect is clean (no crash, no battery drain)
+- [ ] Reconnect works without app restart
+
+### CI Pipeline
+
+```yaml
+# .github/workflows/test.yml
+name: Test
+on: [push, pull_request]
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+      - run: ./gradlew test
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    services:
+      headunit:
+        image: ghcr.io/mretallack/aa-headunit-emulator:latest
+        ports:
+          - 5277:5277
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+      - run: ./gradlew integrationTest
+```
