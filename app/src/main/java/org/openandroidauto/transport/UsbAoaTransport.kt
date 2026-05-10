@@ -15,10 +15,13 @@ class UsbAoaTransport(private val context: Context) : Transport {
 
     companion object {
         const val MODEL = "Android Auto"
+        const val MODEL_ALT = "Android Open Automotive Protocol"
 
         fun findAccessory(context: Context): UsbAccessory? {
             val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-            return usbManager.accessoryList?.firstOrNull { it.model == MODEL }
+            return usbManager.accessoryList?.firstOrNull {
+                it.model == MODEL || it.model == MODEL_ALT
+            }
         }
     }
 

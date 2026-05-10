@@ -22,10 +22,14 @@ class InBandTls(private val engine: SSLEngine) {
     private val netInBuffer: ByteBuffer = ByteBuffer.allocate(engine.session.packetBufferSize)
     private val appBuffer: ByteBuffer = ByteBuffer.allocate(engine.session.applicationBufferSize)
 
+    private var handshakeStarted = false
+
     /**
      * Start the TLS handshake. Returns initial TLS records to send as SSL_HANDSHAKE messages.
      */
     fun beginHandshake(): List<ByteArray> {
+        if (handshakeStarted) return emptyList()
+        handshakeStarted = true
         engine.beginHandshake()
         return processHandshake()
     }
@@ -80,15 +84,19 @@ class InBandTls(private val engine: SSLEngine) {
 
         var loopCount = 0
         while (loopCount++ < 20) {
-            when (engine.handshakeStatus) {
+            val hs = engine.handshakeStatus
+            Log.d(TAG, "Handshake loop #$loopCount status=$hs")
+            when (hs) {
                 SSLEngineResult.HandshakeStatus.NEED_WRAP -> {
                     netOutBuffer.clear()
                     val result = engine.wrap(ByteBuffer.allocate(0), netOutBuffer)
+                    Log.d(TAG, "wrap result: status=${result.status} hs=${result.handshakeStatus} produced=${netOutBuffer.position()}")
                     netOutBuffer.flip()
                     if (netOutBuffer.hasRemaining()) {
                         val record = ByteArray(netOutBuffer.remaining())
                         netOutBuffer.get(record)
                         outgoing.add(record)
+                        Log.d(TAG, "Produced TLS record: ${record.size} bytes")
                     }
                     if (result.handshakeStatus == SSLEngineResult.HandshakeStatus.FINISHED) {
                         onHandshakeFinished()
@@ -99,13 +107,16 @@ class InBandTls(private val engine: SSLEngine) {
                     netInBuffer.flip()
                     if (!netInBuffer.hasRemaining()) {
                         netInBuffer.compact()
+                        Log.d(TAG, "NEED_UNWRAP but no data, waiting")
                         return outgoing // Need more data from peer
                     }
                     appBuffer.clear()
                     val result = engine.unwrap(netInBuffer, appBuffer)
+                    Log.d(TAG, "unwrap result: status=${result.status} hs=${result.handshakeStatus} consumed=${result.bytesConsumed()} produced=${result.bytesProduced()}")
                     netInBuffer.compact()
 
                     if (result.status == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
+                        Log.d(TAG, "BUFFER_UNDERFLOW, need more data")
                         return outgoing // Need more data
                     }
                     if (result.handshakeStatus == SSLEngineResult.HandshakeStatus.FINISHED) {
@@ -116,6 +127,7 @@ class InBandTls(private val engine: SSLEngine) {
                 SSLEngineResult.HandshakeStatus.NEED_TASK -> {
                     var task = engine.delegatedTask
                     while (task != null) { task.run(); task = engine.delegatedTask }
+                    Log.d(TAG, "Ran delegated tasks")
                 }
                 SSLEngineResult.HandshakeStatus.FINISHED,
                 SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING -> {

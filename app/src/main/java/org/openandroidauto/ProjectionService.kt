@@ -102,7 +102,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
             mediaProjection?.let { videoChannel?.setMediaProjection(it) }
 
-            Log.i(TAG, "Starting protocol - sending VERSION_REQUEST")
+            Log.i(TAG, "Starting protocol - waiting for head unit VERSION_REQUEST")
             protocolEngine?.start()
 
             // Start single writer coroutine to serialize all frame writes
@@ -117,7 +117,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     }
 
     private suspend fun readLoop(transport: Transport) {
-        val buffer = ByteBuffer.allocate(32768) // extra space for partial frames
+        val buffer = ByteBuffer.allocate(32768)
         val decoder = MessageFramer.Decoder()
         Log.i(TAG, "Read loop started")
 
@@ -129,9 +129,15 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             }
 
             framesReceived++
+            // Log raw bytes for debugging
+            val pos = buffer.position()
+            val rawHex = StringBuilder()
+            for (i in 0 until minOf(pos, 32)) { rawHex.append(String.format("%02x ", buffer[i])) }
+            Log.d(TAG, "RAW ← $pos bytes: $rawHex")
+
             buffer.flip()
             val messages = decoder.decode(buffer)
-            buffer.compact() // preserve any unconsumed partial frame data
+            buffer.compact()
 
             for (msg in messages) {
                 if (msg.payload.size >= 2) {
@@ -149,6 +155,9 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         Log.d(TAG, "Write loop started")
         try {
             for (frame in writeQueue) {
+                val hex = StringBuilder()
+                for (i in 0 until minOf(frame.size, 32)) { hex.append(String.format("%02x ", frame[i])) }
+                Log.d(TAG, "RAW → ${frame.size} bytes: $hex")
                 transport?.write(ByteBuffer.wrap(frame))
             }
         } catch (e: Exception) {
@@ -185,12 +194,14 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             val type = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
             Log.d(TAG, "→ ch=$channelId type=0x${type.toString(16)} len=${payload.size} ctrl=$control")
         }
+        // Don't encrypt control channel messages during handshake (AUTH_COMPLETE, SSL_HANDSHAKE)
         val tls = inBandTls
-        val encrypted = if (tls != null && tls.isHandshakeComplete) {
-            tls.encrypt(payload)
-        } else payload
-        val isEncrypted = tls?.isHandshakeComplete == true
-        val frames = MessageFramer.encode(channelId, encrypted, control, isEncrypted)
+        val msgType = if (payload.size >= 2) ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF) else 0
+        val shouldEncrypt = tls != null && tls.isHandshakeComplete &&
+            msgType != ControlMessageType.SSL_HANDSHAKE &&
+            msgType != ControlMessageType.AUTH_COMPLETE
+        val outPayload = if (shouldEncrypt) tls!!.encrypt(payload) else payload
+        val frames = MessageFramer.encode(channelId, outPayload, control, shouldEncrypt)
         frames.forEach { frame ->
             writeQueue.trySend(frame)
         }
@@ -199,8 +210,19 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     override fun onTlsData(data: ByteArray) {
         Log.d(TAG, "TLS handshake data received: ${data.size} bytes")
         val tls = inBandTls ?: return
+
+        // Begin handshake on first TLS data received
+        if (!tls.isHandshakeComplete) {
+            val initialResponses = tls.beginHandshake()
+            for (record in initialResponses) {
+                Log.d(TAG, "TLS → sending ${record.size} bytes (initial)")
+                protocolEngine?.sendTlsData(record)
+            }
+        }
+
         val responses = tls.feedHandshakeData(data)
         for (record in responses) {
+            Log.d(TAG, "TLS → sending ${record.size} bytes")
             protocolEngine?.sendTlsData(record)
         }
         if (tls.isHandshakeComplete) {

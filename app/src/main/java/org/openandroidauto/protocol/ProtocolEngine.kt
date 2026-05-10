@@ -60,17 +60,18 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
 
     companion object {
         const val PROTOCOL_VERSION_MAJOR = 1
-        const val PROTOCOL_VERSION_MINOR = 1
+        const val PROTOCOL_VERSION_MINOR = 5
         const val CONTROL_CHANNEL: UByte = 0u
     }
 
     /**
-     * Start the protocol by sending VERSION_REQUEST.
+     * Start the protocol - wait for head unit's VERSION_REQUEST.
+     * In AAP, the head unit initiates by sending VERSION_REQUEST, phone responds.
      */
     fun start() {
         check(state == ProtocolState.IDLE) { "Cannot start in state $state" }
+        Log.i(TAG, "Protocol started, waiting for VERSION_REQUEST from head unit")
         state = ProtocolState.VERSION_NEGOTIATION
-        sendVersionRequest()
     }
 
     /**
@@ -78,6 +79,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
      */
     fun onMessage(messageType: Int, payload: ByteArray) {
         when (messageType) {
+            ControlMessageType.VERSION_REQUEST -> handleVersionRequest(payload)
             ControlMessageType.VERSION_RESPONSE -> handleVersionResponse(payload)
             ControlMessageType.SSL_HANDSHAKE -> handleSslHandshake(payload)
             ControlMessageType.SERVICE_DISCOVERY_REQUEST -> handleServiceDiscoveryRequest(payload)
@@ -161,6 +163,31 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             .array()
         val msg = buildMessage(ControlMessageType.VERSION_REQUEST, payload)
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
+    }
+
+    private fun sendVersionResponse() {
+        // Version response: major(2) + minor(2) + status(2) where 0=compatible
+        val payload = ByteBuffer.allocate(6).order(ByteOrder.BIG_ENDIAN)
+            .putShort(PROTOCOL_VERSION_MAJOR.toShort())
+            .putShort(PROTOCOL_VERSION_MINOR.toShort())
+            .putShort(0) // status: compatible
+            .array()
+        val msg = buildMessage(ControlMessageType.VERSION_RESPONSE, payload)
+        callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
+    }
+
+    private fun handleVersionRequest(payload: ByteArray) {
+        check(state == ProtocolState.VERSION_NEGOTIATION) { "Version request in wrong state: $state" }
+        // Parse head unit's version
+        if (payload.size >= 4) {
+            val major = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+            val minor = ((payload[2].toInt() and 0xFF) shl 8) or (payload[3].toInt() and 0xFF)
+            Log.i(TAG, "Head unit version: $major.$minor")
+        }
+        // Send VERSION_RESPONSE: major(2) + minor(2) + status(2) where status=0 means compatible
+        sendVersionResponse()
+        state = ProtocolState.TLS_HANDSHAKE
+        Log.i(TAG, "Sent VERSION_RESPONSE, moving to TLS_HANDSHAKE")
     }
 
     private fun handleVersionResponse(payload: ByteArray) {

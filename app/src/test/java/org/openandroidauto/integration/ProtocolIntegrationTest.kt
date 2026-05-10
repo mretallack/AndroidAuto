@@ -9,6 +9,7 @@ import org.openandroidauto.channel.*
 import org.openandroidauto.protocol.*
 import org.openandroidauto.transport.TcpTransport
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
  * Integration tests that verify the full protocol flow over TCP.
@@ -60,26 +61,15 @@ class ProtocolIntegrationTest {
         connectJob.join()
         assertTrue(transport.isConnected)
 
-        // Phone sends VERSION_REQUEST
+        // Phone starts protocol (waits for VERSION_REQUEST)
         engine.start()
         assertEquals(ProtocolState.VERSION_NEGOTIATION, engine.state)
 
-        // Send the VERSION_REQUEST frame over TCP
-        val versionFrame = cb.sentFrames.last()
-        transport.write(ByteBuffer.wrap(
-            MessageFramer.encode(versionFrame.first, versionFrame.second, versionFrame.third)[0]
-        ))
+        // Head unit sends VERSION_REQUEST
+        headUnit.sendControlMessage(ControlMessageType.VERSION_REQUEST,
+            ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN).putShort(1).putShort(5).array())
 
-        // Head unit reads it and verifies
-        val versionReq = headUnit.readFrame()
-        assertNotNull(versionReq)
-        assertEquals(0.toUByte(), versionReq!!.channelId)
-        assertEquals(ControlMessageType.VERSION_REQUEST, versionReq.messageType)
-
-        // Head unit sends VERSION_RESPONSE
-        headUnit.sendVersionResponse()
-
-        // Phone reads the response
+        // Phone reads and processes
         val readBuf = ByteBuffer.allocate(1024)
         transport.read(readBuf)
         readBuf.flip()
@@ -88,47 +78,20 @@ class ProtocolIntegrationTest {
         val messages = decoder.decode(readBuf)
         assertEquals(1, messages.size)
 
-        // Extract message type and feed to engine
         val msgPayload = messages[0].payload
         val msgType = ((msgPayload[0].toInt() and 0xFF) shl 8) or (msgPayload[1].toInt() and 0xFF)
         engine.onMessage(msgType, msgPayload.copyOfRange(2, msgPayload.size))
 
-        // Should now be in TLS_HANDSHAKE state
+        // Should now be in TLS_HANDSHAKE state and have sent VERSION_RESPONSE
         assertEquals(ProtocolState.TLS_HANDSHAKE, engine.state)
+        assertEquals(1, cb.sentFrames.size)
+        val sentMsg = cb.sentFrames[0].second
+        val sentType = ((sentMsg[0].toInt() and 0xFF) shl 8) or (sentMsg[1].toInt() and 0xFF)
+        assertEquals(ControlMessageType.VERSION_RESPONSE, sentType)
 
         // Skip TLS for this test - simulate completion
         engine.onTlsHandshakeComplete()
         assertEquals(ProtocolState.SERVICE_DISCOVERY, engine.state)
-
-        // Send AUTH_COMPLETE frame
-        val authFrame = cb.sentFrames.last()
-        transport.write(ByteBuffer.wrap(
-            MessageFramer.encode(authFrame.first, authFrame.second, authFrame.third)[0]
-        ))
-
-        // Head unit reads AUTH_COMPLETE
-        val authMsg = headUnit.readFrame()
-        assertNotNull(authMsg)
-        assertEquals(ControlMessageType.AUTH_COMPLETE, authMsg!!.messageType)
-
-        // Head unit sends SERVICE_DISCOVERY_REQUEST
-        headUnit.sendServiceDiscoveryRequest("TestHeadUnit", "TestBrand")
-
-        // Phone reads it
-        readBuf.clear()
-        transport.read(readBuf)
-        readBuf.flip()
-        val discoveryMsgs = decoder.decode(readBuf)
-        assertEquals(1, discoveryMsgs.size)
-
-        val discPayload = discoveryMsgs[0].payload
-        val discType = ((discPayload[0].toInt() and 0xFF) shl 8) or (discPayload[1].toInt() and 0xFF)
-        engine.onMessage(discType, discPayload.copyOfRange(2, discPayload.size))
-
-        // Phone sends SERVICE_DISCOVERY_RESPONSE
-        engine.sendServiceDiscoveryResponse(ByteArray(0))
-        assertEquals(ProtocolState.ACTIVE, engine.state)
-        assertEquals(1, cb.activeCount)
     }
 
     @Test

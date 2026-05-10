@@ -33,20 +33,15 @@ class MainActivity : AppCompatActivity() {
         if (denied.isNotEmpty()) {
             Log.w(TAG, "Permissions denied: $denied (continuing anyway)")
         }
-        // Continue regardless — non-critical permissions can be denied
-        handleConnection()
+        requestMediaProjection()
     }
 
     private val mediaProjectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK && result.data != null) {
-            Log.i(TAG, "MediaProjection permission granted")
-            val serviceIntent = Intent(this, ProjectionService::class.java).apply {
-                putExtra(ProjectionService.EXTRA_PROJECTION_RESULT_CODE, result.resultCode)
-                putExtra(ProjectionService.EXTRA_PROJECTION_DATA, result.data)
-            }
-            startForegroundService(serviceIntent)
+            Log.i(TAG, "MediaProjection permission granted, starting service")
+            startProjectionService(result.resultCode, result.data!!)
         } else {
             Log.w(TAG, "MediaProjection permission denied")
         }
@@ -54,13 +49,21 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Log.i(TAG, "MainActivity created")
+        Log.i(TAG, "MainActivity created, action=${intent?.action}")
+
+        if (intent?.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
+            Log.i(TAG, "Launched via USB accessory intent")
+            val accessory = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY, UsbAccessory::class.java)
+            Log.i(TAG, "Accessory: manufacturer=${accessory?.manufacturer} model=${accessory?.model}")
+        }
+
         checkPermissionsAndStart()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         Log.i(TAG, "onNewIntent: ${intent.action}")
+        setIntent(intent)
         if (intent.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
             checkPermissionsAndStart()
         }
@@ -75,25 +78,28 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG, "Requesting permissions: $missing")
             permissionLauncher.launch(missing.toTypedArray())
         } else {
-            Log.i(TAG, "All permissions already granted")
-            handleConnection()
-        }
-    }
-
-    private fun handleConnection() {
-        val accessory = UsbAoaTransport.findAccessory(this)
-        if (accessory != null) {
-            Log.i(TAG, "AA accessory found: ${accessory.manufacturer}/${accessory.model}")
             requestMediaProjection()
-        } else {
-            Log.i(TAG, "No head unit connected. Waiting for USB...")
-            // When USB is plugged in, the intent filter will re-launch this activity
         }
     }
 
     private fun requestMediaProjection() {
-        val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        Log.i(TAG, "Requesting MediaProjection consent")
-        mediaProjectionLauncher.launch(mpManager.createScreenCaptureIntent())
+        // Check if accessory is available
+        val accessory = UsbAoaTransport.findAccessory(this)
+        if (accessory != null) {
+            Log.i(TAG, "Accessory found: ${accessory.manufacturer}/${accessory.model}, requesting screen capture")
+            val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjectionLauncher.launch(mpManager.createScreenCaptureIntent())
+        } else {
+            Log.i(TAG, "No accessory found yet. Waiting for USB connection...")
+        }
+    }
+
+    private fun startProjectionService(resultCode: Int, data: Intent) {
+        val serviceIntent = Intent(this, ProjectionService::class.java).apply {
+            putExtra(ProjectionService.EXTRA_PROJECTION_RESULT_CODE, resultCode)
+            putExtra(ProjectionService.EXTRA_PROJECTION_DATA, data)
+        }
+        startForegroundService(serviceIntent)
+        Log.i(TAG, "ProjectionService started")
     }
 }

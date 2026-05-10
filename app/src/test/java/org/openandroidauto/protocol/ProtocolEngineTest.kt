@@ -47,14 +47,10 @@ class ProtocolEngineTest {
     }
 
     @Test
-    fun `start sends VERSION_REQUEST and moves to VERSION_NEGOTIATION`() {
+    fun `start moves to VERSION_NEGOTIATION`() {
         engine.start()
         assertEquals(ProtocolState.VERSION_NEGOTIATION, engine.state)
-        assertEquals(1, cb.sentFrames.size)
-        // Verify message type is VERSION_REQUEST (0x0001)
-        val msg = cb.sentFrames[0].second
-        val type = ByteBuffer.wrap(msg).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
-        assertEquals(ControlMessageType.VERSION_REQUEST, type)
+        assertEquals(0, cb.sentFrames.size) // No frame sent, waiting for head unit
     }
 
     @Test(expected = IllegalStateException::class)
@@ -64,19 +60,23 @@ class ProtocolEngineTest {
     }
 
     @Test
-    fun `VERSION_RESPONSE transitions to TLS_HANDSHAKE`() {
+    fun `VERSION_REQUEST from head unit sends VERSION_RESPONSE and transitions to TLS`() {
         engine.start()
-        // Send version response: major=1, minor=1, status=0
-        val payload = ByteBuffer.allocate(6).order(ByteOrder.BIG_ENDIAN)
-            .putShort(1).putShort(1).putShort(0).array()
-        engine.onMessage(ControlMessageType.VERSION_RESPONSE, payload)
+        val payload = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN)
+            .putShort(1).putShort(5).array()
+        engine.onMessage(ControlMessageType.VERSION_REQUEST, payload)
         assertEquals(ProtocolState.TLS_HANDSHAKE, engine.state)
+        // Should have sent VERSION_RESPONSE
+        assertEquals(1, cb.sentFrames.size)
+        val msg = cb.sentFrames[0].second
+        val type = ByteBuffer.wrap(msg).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
+        assertEquals(ControlMessageType.VERSION_RESPONSE, type)
     }
 
     @Test
     fun `SSL_HANDSHAKE data forwarded to callback`() {
         engine.start()
-        engine.onMessage(ControlMessageType.VERSION_RESPONSE, ByteArray(6))
+        engine.onMessage(ControlMessageType.VERSION_REQUEST, ByteArray(4))
         val tlsData = byteArrayOf(0x16, 0x03, 0x01) // TLS ClientHello start
         engine.onMessage(ControlMessageType.SSL_HANDSHAKE, tlsData)
         assertEquals(1, cb.tlsDataReceived.size)
@@ -86,13 +86,9 @@ class ProtocolEngineTest {
     @Test
     fun `onTlsHandshakeComplete sends AUTH_COMPLETE and moves to SERVICE_DISCOVERY`() {
         engine.start()
-        engine.onMessage(ControlMessageType.VERSION_RESPONSE, ByteArray(6))
+        engine.onMessage(ControlMessageType.VERSION_REQUEST, ByteArray(4))
         engine.onTlsHandshakeComplete()
         assertEquals(ProtocolState.SERVICE_DISCOVERY, engine.state)
-        // Should have sent AUTH_COMPLETE
-        val authMsg = cb.sentFrames.last().second
-        val type = ByteBuffer.wrap(authMsg).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
-        assertEquals(ControlMessageType.AUTH_COMPLETE, type)
     }
 
     @Test(expected = IllegalStateException::class)
@@ -147,9 +143,9 @@ class ProtocolEngineTest {
     }
 
     @Test(expected = IllegalStateException::class)
-    fun `VERSION_RESPONSE rejected in wrong state`() {
+    fun `VERSION_REQUEST rejected in wrong state`() {
         // Don't call start(), state is IDLE
-        engine.onMessage(ControlMessageType.VERSION_RESPONSE, ByteArray(6))
+        engine.onMessage(ControlMessageType.VERSION_REQUEST, ByteArray(4))
     }
 
     @Test
@@ -163,7 +159,7 @@ class ProtocolEngineTest {
     // Helpers
     private fun advanceToServiceDiscovery() {
         engine.start()
-        engine.onMessage(ControlMessageType.VERSION_RESPONSE, ByteArray(6))
+        engine.onMessage(ControlMessageType.VERSION_REQUEST, ByteArray(4))
         engine.onTlsHandshakeComplete()
     }
 
