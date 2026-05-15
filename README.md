@@ -99,7 +99,17 @@ After AES decryption, the `T()` function extracts the key:
 - Base64 decode (URL_SAFE, flag=2) the middle portion
 - Result is PKCS#8 DER encoded RSA private key
 
-**Note:** Must run on Android (not desktop JVM) due to `android.util.Base64` vs `java.util.Base64` differences. Alternatively, use `Base64.getUrlDecoder()` on desktop.
+**Note:** Must run on Android (not desktop JVM) due to `android.util.Base64` vs `java.util.Base64` differences. The desktop JVM's `Base64.getUrlDecoder()` rejects standard base64 characters (`+`, `/`) and newlines that Android's decoder accepts. Use `Base64.getMimeDecoder()` on desktop, or run the decryption on-device with `dalvikvm`:
+
+```bash
+# Compile to DEX and run on any Android device with ADB access
+javac Decrypt.java -d out
+d8 out/Decrypt.class --output dex_out
+adb push dex_out/classes.dex /data/local/tmp/decrypt.dex
+adb shell "dalvikvm -cp /data/local/tmp/decrypt.dex Decrypt"
+```
+
+This outputs the PKCS#8 private key in base64. Wrap it in PEM headers and place at `app/src/main/assets/carservice_key.pem`.
 
 See `tools/decrypt_key_from_apk.md` for detailed steps.
 
