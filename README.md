@@ -72,13 +72,21 @@ The phone presents a 2-cert chain:
 
 The private key is AES-256-CBC encrypted inside the Android Auto APK. The head unit validates the phone's cert against the Google Automotive Link CA — any cert signed by that CA is accepted, **regardless of expiry date** (head units don't check expiry).
 
-#### Path A: Decrypt from the APK (offline)
+#### Path A: Decrypt from the APK
 
-The key can be extracted by running the APK's own decryption code. The process:
+The key is embedded (encrypted) in the Android Auto APK and can be decrypted using the APK's own algorithm. This requires any Android device with ADB access (no root, no Google Play Services needed) to run the decryption, because Android's Base64 decoder behaves differently from the desktop JVM.
 
-1. Decompile the AA APK with JADX
-2. Find the class implementing the cert provider interface (has a cert PEM string + two `byte[]` arrays)
-3. Run the decryption function (`AES/CBC/PKCS5Padding`) with the custom KDF
+**Requirements:**
+- A phone with Google Play Services to pull the APK from (the AA app must be installed via Play Store)
+- Any Android device with ADB access to run the decryption (can be a different device)
+- Android SDK (`d8` build tool, `adb`)
+
+**Process:**
+
+1. Pull the AA APK from a phone: `adb pull $(adb shell pm path com.google.android.projection.gearhead | grep base | cut -d: -f2) aa.apk`
+2. Decompile with JADX to find the cert provider class (contains a cert PEM string + two `byte[]` arrays)
+3. Extract the binary data (256-byte KDF salt + ~1712-byte encrypted key + cert PEMs)
+4. Compile the decryption Java class to DEX and run on-device with `dalvikvm`
 
 **Important:** The APK must be pulled from a real phone (`adb pull`), not downloaded from APKPure/APKMirror. Download sites may cache old builds with stale byte arrays that won't decrypt.
 
