@@ -70,7 +70,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
      */
     fun start() {
         check(state == ProtocolState.IDLE) { "Cannot start in state $state" }
-        Log.i(TAG, "Protocol started, waiting for VERSION_REQUEST from head unit")
+        Log.w(TAG, "Protocol started, waiting for VERSION_REQUEST from head unit")
         state = ProtocolState.VERSION_NEGOTIATION
     }
 
@@ -82,21 +82,25 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             ControlMessageType.VERSION_REQUEST -> handleVersionRequest(payload)
             ControlMessageType.VERSION_RESPONSE -> handleVersionResponse(payload)
             ControlMessageType.SSL_HANDSHAKE -> handleSslHandshake(payload)
+            ControlMessageType.AUTH_COMPLETE -> handleAuthComplete(payload)
             ControlMessageType.SERVICE_DISCOVERY_REQUEST -> handleServiceDiscoveryRequest(payload)
+            ControlMessageType.SERVICE_DISCOVERY_RESPONSE -> handleServiceDiscoveryResponse(payload)
             ControlMessageType.CHANNEL_OPEN_REQUEST -> handleChannelOpenRequest(payload)
+            ControlMessageType.CHANNEL_OPEN_RESPONSE -> { Log.w(TAG, "Channel open response received") }
             ControlMessageType.PING_REQUEST -> handlePingRequest(payload)
             ControlMessageType.PING_RESPONSE -> {} // Acknowledged
             ControlMessageType.SHUTDOWN_REQUEST -> handleShutdownRequest(payload)
+            else -> Log.w(TAG, "Unknown control message type: 0x${messageType.toString(16)}")
         }
     }
 
     /**
      * Called when TLS handshake completes successfully.
+     * We wait for the head unit to send AUTH_COMPLETE before responding.
      */
     fun onTlsHandshakeComplete() {
         check(state == ProtocolState.TLS_HANDSHAKE) { "TLS complete in wrong state: $state" }
-        Log.i(TAG, "TLS complete, sending AUTH_COMPLETE, moving to SERVICE_DISCOVERY")
-        sendAuthComplete()
+        Log.w(TAG, "TLS complete, waiting for head unit AUTH_COMPLETE")
         state = ProtocolState.SERVICE_DISCOVERY
     }
 
@@ -105,7 +109,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
      */
     fun sendTlsData(data: ByteArray) {
         val msg = buildMessage(ControlMessageType.SSL_HANDSHAKE, data)
-        callback.onSendFrame(CONTROL_CHANNEL, msg, control = true)
+        callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
     }
 
     /**
@@ -182,18 +186,46 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         if (payload.size >= 4) {
             val major = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
             val minor = ((payload[2].toInt() and 0xFF) shl 8) or (payload[3].toInt() and 0xFF)
-            Log.i(TAG, "Head unit version: $major.$minor")
+            Log.w(TAG, "Head unit version: $major.$minor")
         }
         // Send VERSION_RESPONSE: major(2) + minor(2) + status(2) where status=0 means compatible
         sendVersionResponse()
         state = ProtocolState.TLS_HANDSHAKE
-        Log.i(TAG, "Sent VERSION_RESPONSE, moving to TLS_HANDSHAKE")
+        Log.w(TAG, "Sent VERSION_RESPONSE, moving to TLS_HANDSHAKE")
     }
 
     private fun handleVersionResponse(payload: ByteArray) {
         check(state == ProtocolState.VERSION_NEGOTIATION) { "Version response in wrong state: $state" }
-        Log.i(TAG, "Version response received, moving to TLS_HANDSHAKE")
+        Log.w(TAG, "Version response received, moving to TLS_HANDSHAKE")
         state = ProtocolState.TLS_HANDSHAKE
+    }
+
+    private fun handleAuthComplete(payload: ByteArray) {
+        // Parse status from protobuf field 1
+        var status = 0
+        var i = 0
+        while (i < payload.size) {
+            val tag = payload[i].toInt() and 0xFF; i++
+            val field = tag ushr 3
+            var value = 0L; var shift = 0
+            while (i < payload.size) {
+                val b = payload[i].toInt() and 0xFF; i++
+                value = value or (((b and 0x7F).toLong()) shl shift)
+                if (b and 0x80 == 0) break
+                shift += 7
+            }
+            if (field == 1) status = value.toInt()
+        }
+        Log.w(TAG, "Received AUTH_COMPLETE from head unit, status=$status")
+        // Respond with our AUTH_COMPLETE and initiate service discovery
+        sendAuthComplete()
+        sendServiceDiscoveryRequest()
+    }
+
+    private fun handleServiceDiscoveryResponse(payload: ByteArray) {
+        Log.w(TAG, "Received SERVICE_DISCOVERY_RESPONSE (${payload.size} bytes)")
+        state = ProtocolState.ACTIVE
+        callback.onActive()
     }
 
     private fun handleSslHandshake(payload: ByteArray) {
@@ -206,6 +238,20 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         val protobufPayload = byteArrayOf(0x08, 0x00) // field 1, varint, value 0 (OK)
         val msg = buildMessage(ControlMessageType.AUTH_COMPLETE, protobufPayload)
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = true)
+    }
+
+    private fun sendServiceDiscoveryRequest() {
+        val name = "Open Android Auto".toByteArray()
+        val brand = "OpenAA".toByteArray()
+        val payload = ByteArray(4 + name.size + brand.size)
+        var i = 0
+        payload[i++] = 0x22.toByte(); payload[i++] = name.size.toByte()
+        name.copyInto(payload, i); i += name.size
+        payload[i++] = 0x2A.toByte(); payload[i++] = brand.size.toByte()
+        brand.copyInto(payload, i)
+        val msg = buildMessage(ControlMessageType.SERVICE_DISCOVERY_REQUEST, payload)
+        Log.w(TAG, "Sending SERVICE_DISCOVERY_REQUEST")
+        callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
     }
 
     private fun handleServiceDiscoveryRequest(payload: ByteArray) {
@@ -246,7 +292,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
     }
 
     private fun handleShutdownRequest(payload: ByteArray) {
-        Log.i(TAG, "Shutdown request received")
+        Log.w(TAG, "Shutdown request received")
         val msg = buildMessage(ControlMessageType.SHUTDOWN_RESPONSE, ByteArray(0))
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = true)
         state = ProtocolState.DISCONNECTED

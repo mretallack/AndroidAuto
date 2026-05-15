@@ -1,0 +1,4 @@
+[submodule "third_party/aasdk"]
+	path = third_party/aasdk
+	url = https://github.com/f1xpl/aasdk.git
+	branch = development

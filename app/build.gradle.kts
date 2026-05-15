@@ -4,6 +4,8 @@ plugins {
     id("com.google.protobuf")
 }
 
+import com.google.protobuf.gradle.proto
+
 android {
     namespace = "org.openandroidauto"
     compileSdk = 35
@@ -33,6 +35,14 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+
+    sourceSets {
+        getByName("main") {
+            proto {
+                srcDir("${rootProject.projectDir}/third_party/aasdk/aasdk_proto")
+            }
+        }
     }
 }
 

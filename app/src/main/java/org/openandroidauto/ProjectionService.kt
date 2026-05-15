@@ -46,32 +46,20 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     override fun onCreate() {
         super.onCreate()
-        Log.i(TAG, "Service created")
+        Log.w(TAG, "Service created")
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
         acquireWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.i(TAG, "Service starting")
-
-        // Obtain MediaProjection from the activity result
-        val resultCode = intent?.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, -1) ?: -1
-        val data = intent?.getParcelableExtra(EXTRA_PROJECTION_DATA, Intent::class.java)
-        if (resultCode != -1 && data != null) {
-            val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as android.media.projection.MediaProjectionManager
-            mediaProjection = mpManager.getMediaProjection(resultCode, data)
-            Log.i(TAG, "MediaProjection obtained")
-        } else {
-            Log.w(TAG, "No MediaProjection data in intent")
-        }
-
+        Log.w(TAG, "Service starting")
         scope.launch { startSession() }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        Log.i(TAG, "Service destroying. Frames sent=$framesSent received=$framesReceived")
+        Log.w(TAG, "Service destroying. Frames sent=$framesSent received=$framesReceived")
         scope.cancel()
         videoChannel?.stop()
         runBlocking { transport?.disconnect() }
@@ -81,18 +69,18 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     private suspend fun startSession() {
         try {
-            Log.i(TAG, "Looking for USB accessory...")
+            Log.w(TAG, "Looking for USB accessory...")
             val usbTransport = UsbAoaTransport(this)
 
-            Log.i(TAG, "Connecting to USB accessory...")
+            Log.w(TAG, "Connecting to USB accessory...")
             usbTransport.connect()
-            Log.i(TAG, "USB connected successfully")
+            Log.w(TAG, "USB connected successfully")
 
-            Log.i(TAG, "Initializing TLS...")
-            val tlsServer = AaTlsServer(AaTlsServer.getOrCreateKeyStore())
+            Log.w(TAG, "Initializing TLS...")
+            val tlsServer = AaTlsServer(AaTlsServer.createKeyStore(this@ProjectionService))
             val engine = tlsServer.createEngine()
             inBandTls = InBandTls(engine)
-            Log.i(TAG, "TLS engine created (server mode, TLSv1.2)")
+            Log.w(TAG, "TLS engine created (server mode, TLSv1.2)")
 
             transport = usbTransport
 
@@ -102,7 +90,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
             mediaProjection?.let { videoChannel?.setMediaProjection(it) }
 
-            Log.i(TAG, "Starting protocol - waiting for head unit VERSION_REQUEST")
+            Log.w(TAG, "Starting protocol - waiting for head unit VERSION_REQUEST")
             protocolEngine?.start()
 
             // Start single writer coroutine to serialize all frame writes
@@ -119,7 +107,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     private suspend fun readLoop(transport: Transport) {
         val buffer = ByteBuffer.allocate(32768)
         val decoder = MessageFramer.Decoder()
-        Log.i(TAG, "Read loop started")
+        Log.w(TAG, "Read loop started")
 
         while (scope.isActive) {
             val read = transport.read(buffer)
@@ -133,7 +121,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             val pos = buffer.position()
             val rawHex = StringBuilder()
             for (i in 0 until minOf(pos, 32)) { rawHex.append(String.format("%02x ", buffer[i])) }
-            Log.d(TAG, "RAW ← $pos bytes: $rawHex")
+            Log.w(TAG, "RAW ← $pos bytes: $rawHex")
 
             buffer.flip()
             val messages = decoder.decode(buffer)
@@ -142,36 +130,55 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             for (msg in messages) {
                 if (msg.payload.size >= 2) {
                     val type = ((msg.payload[0].toInt() and 0xFF) shl 8) or (msg.payload[1].toInt() and 0xFF)
-                    Log.d(TAG, "← ch=${msg.channelId} type=0x${type.toString(16)} len=${msg.payload.size}")
+                    Log.w(TAG, "← ch=${msg.channelId} type=0x${type.toString(16)} len=${msg.payload.size}")
                 }
                 routeMessage(msg)
             }
         }
-        Log.i(TAG, "Read loop ended")
+        Log.w(TAG, "Read loop ended")
         stopSelf()
     }
 
     private suspend fun writeLoop() {
-        Log.d(TAG, "Write loop started")
+        Log.w(TAG, "Write loop started")
         try {
             for (frame in writeQueue) {
                 val hex = StringBuilder()
                 for (i in 0 until minOf(frame.size, 32)) { hex.append(String.format("%02x ", frame[i])) }
-                Log.d(TAG, "RAW → ${frame.size} bytes: $hex")
+                Log.w(TAG, "RAW → ${frame.size} bytes: $hex")
                 transport?.write(ByteBuffer.wrap(frame))
             }
         } catch (e: Exception) {
             Log.e(TAG, "Write loop error: ${e.message}")
         }
-        Log.d(TAG, "Write loop ended")
+        Log.w(TAG, "Write loop ended")
     }
 
     private fun routeMessage(msg: MessageFramer.Decoder.Message) {
         if (msg.payload.isEmpty()) return
 
-        // Decrypt if TLS is active (check encrypted flag in frame)
         val tls = inBandTls
-        val payload = if (tls != null && tls.isHandshakeComplete && msg.payload.size > 2) {
+        val engineState = protocolEngine?.state
+
+        // During TLS handshake, any data on channel 0 might be TLS records
+        if (engineState == ProtocolState.TLS_HANDSHAKE && msg.channelId.toInt() == 0 && tls != null && !tls.isHandshakeComplete) {
+            // Check if this looks like a message type we know, or raw TLS data
+            val possibleType = if (msg.payload.size >= 2) ((msg.payload[0].toInt() and 0xFF) shl 8) or (msg.payload[1].toInt() and 0xFF) else 0
+            if (possibleType == ControlMessageType.SSL_HANDSHAKE) {
+                // Standard SSL_HANDSHAKE message
+                val tlsData = if (msg.payload.size > 2) msg.payload.copyOfRange(2, msg.payload.size) else ByteArray(0)
+                onTlsData(tlsData)
+            } else {
+                // Could be encrypted TLS flight - feed entire payload to TLS engine
+                Log.w(TAG, "Feeding ${msg.payload.size} bytes to TLS (possible encrypted flight)")
+                onTlsData(msg.payload)
+            }
+            return
+        }
+
+        // Decrypt only if frame has encrypted flag set (bit 3 of flags)
+        val isEncryptedFrame = (msg.flags.toInt() and 0x08) != 0
+        val payload = if (tls != null && tls.isHandshakeComplete && isEncryptedFrame && msg.payload.size > 2) {
             tls.decrypt(msg.payload)
         } else msg.payload
 
@@ -192,41 +199,35 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         framesSent++
         if (payload.size >= 2) {
             val type = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
-            Log.d(TAG, "→ ch=$channelId type=0x${type.toString(16)} len=${payload.size} ctrl=$control")
+            Log.w(TAG, "→ ch=$channelId type=0x${type.toString(16)} len=${payload.size} ctrl=$control")
         }
-        // Don't encrypt control channel messages during handshake (AUTH_COMPLETE, SSL_HANDSHAKE)
-        val tls = inBandTls
-        val msgType = if (payload.size >= 2) ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF) else 0
-        val shouldEncrypt = tls != null && tls.isHandshakeComplete &&
-            msgType != ControlMessageType.SSL_HANDSHAKE &&
-            msgType != ControlMessageType.AUTH_COMPLETE
-        val outPayload = if (shouldEncrypt) tls!!.encrypt(payload) else payload
-        val frames = MessageFramer.encode(channelId, outPayload, control, shouldEncrypt)
+        // Don't encrypt for now - head unit sends all frames unencrypted
+        val frames = MessageFramer.encode(channelId, payload, control, encrypted = false)
         frames.forEach { frame ->
             writeQueue.trySend(frame)
         }
     }
 
     override fun onTlsData(data: ByteArray) {
-        Log.d(TAG, "TLS handshake data received: ${data.size} bytes")
+        Log.w(TAG, "TLS handshake data received: ${data.size} bytes")
         val tls = inBandTls ?: return
 
         // Begin handshake on first TLS data received
         if (!tls.isHandshakeComplete) {
             val initialResponses = tls.beginHandshake()
             for (record in initialResponses) {
-                Log.d(TAG, "TLS → sending ${record.size} bytes (initial)")
+                Log.w(TAG, "TLS → sending ${record.size} bytes (initial)")
                 protocolEngine?.sendTlsData(record)
             }
         }
 
         val responses = tls.feedHandshakeData(data)
         for (record in responses) {
-            Log.d(TAG, "TLS → sending ${record.size} bytes")
+            Log.w(TAG, "TLS → sending ${record.size} bytes")
             protocolEngine?.sendTlsData(record)
         }
         if (tls.isHandshakeComplete) {
-            Log.i(TAG, "TLS handshake complete, notifying protocol engine")
+            Log.w(TAG, "TLS handshake complete, notifying protocol engine")
             protocolEngine?.onTlsHandshakeComplete()
         }
     }
@@ -236,24 +237,24 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     }
 
     override fun onServiceDiscoveryRequest(deviceName: String, deviceBrand: String) {
-        Log.i(TAG, "Service discovery from: $deviceName ($deviceBrand)")
+        Log.w(TAG, "Service discovery from: $deviceName ($deviceBrand)")
         val response = ServiceDiscoveryBuilder.build()
-        Log.i(TAG, "Sending service discovery response: ${response.size} bytes, 4 channels")
+        Log.w(TAG, "Sending service discovery response: ${response.size} bytes, 4 channels")
         protocolEngine?.sendServiceDiscoveryResponse(response)
     }
 
     override fun onChannelOpenRequest(channelId: Int, priority: Int) {
-        Log.i(TAG, "Channel open request: ch=$channelId priority=$priority")
+        Log.w(TAG, "Channel open request: ch=$channelId priority=$priority")
         protocolEngine?.sendChannelOpenResponse(0)
     }
 
     override fun onActive() {
-        Log.i(TAG, "Protocol ACTIVE - connection established!")
+        Log.w(TAG, "Protocol ACTIVE - connection established!")
         updateNotification("Connected")
     }
 
     override fun onShutdown() {
-        Log.i(TAG, "Shutdown requested")
+        Log.w(TAG, "Shutdown requested")
         updateNotification("Disconnected")
         stopSelf()
     }
@@ -265,13 +266,13 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     // --- InputChannelCallback ---
     override fun onTouchEvent(event: InputEvent) {
-        Log.d(TAG, "Touch: ${event.action} points=${event.touchPoints.size} " +
+        Log.w(TAG, "Touch: ${event.action} points=${event.touchPoints.size} " +
             "pos=(${event.touchPoints.firstOrNull()?.x},${event.touchPoints.firstOrNull()?.y})")
     }
 
     override fun onKeyEvent(event: KeyEvent) {
         val androidCode = KeyCodeMap.toAndroidKeyCode(event.scanCode)
-        Log.d(TAG, "Key: scanCode=${event.scanCode} android=$androidCode pressed=${event.isPressed} long=${event.longPress}")
+        Log.w(TAG, "Key: scanCode=${event.scanCode} android=$androidCode pressed=${event.isPressed} long=${event.longPress}")
     }
 
     override fun onSendMessage(channelId: UByte, payload: ByteArray) {
@@ -294,7 +295,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     }
 
     private fun updateNotification(text: String) {
-        Log.i(TAG, "Status: $text")
+        Log.w(TAG, "Status: $text")
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification(text))
     }
