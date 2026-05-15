@@ -13,3 +13,4 @@ local.properties
 /tools/jadx.zip
 /tools/jadx/
 venv/
+app/src/main/assets/carservice_key.pem
