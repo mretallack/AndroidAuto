@@ -56,7 +56,7 @@ Requires Android SDK with platform 35.
 
 - [uglyoldbob/android-auto](https://github.com/uglyoldbob/android-auto) (Rust, LGPL-3.0) — protocol implementation with protobuf definitions
 - [headunit-revived](https://github.com/andreknieriem/headunit-revived) (Kotlin, AGPL-3.0) — head-unit side implementation
-- [f1xpl/aasdk](https://github.com/nickel-org/nickel.rs) (C++, GPL-3.0) — original protocol library
+- [f1xpl/aasdk](https://github.com/f1xpl/aasdk) (C++, GPL-3.0) — original protocol library
 
 ## TLS Authentication
 
@@ -79,6 +79,8 @@ The key can be extracted by running the APK's own decryption code. The process:
 1. Decompile the AA APK with JADX
 2. Find the class implementing the cert provider interface (has a cert PEM string + two `byte[]` arrays)
 3. Run the decryption function (`AES/CBC/PKCS5Padding`) with the custom KDF
+
+**Important:** The APK must be pulled from a real phone (`adb pull`), not downloaded from APKPure/APKMirror. Download sites may cache old builds with stale byte arrays that won't decrypt.
 
 **Critical JADX bug:** JADX decompiles the KDF helper as `byte b = bArr2[i2] & 255;` but it must be `int b = bArr2[i2] & 255;`. The `byte` type truncates back to signed, producing garbage output. Fix this to `int` and the decryption works.
 
