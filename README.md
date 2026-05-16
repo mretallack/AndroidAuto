@@ -70,7 +70,7 @@ The phone presents a 2-cert chain:
 
 ### Obtaining the Private Key
 
-The private key is AES-256-CBC encrypted inside the Android Auto APK. The head unit validates the phone's cert against the Google Automotive Link CA — any cert signed by that CA is accepted, **regardless of expiry date** (head units don't check expiry).
+The private key is AES-256-CBC encrypted inside the Android Auto APK. The head unit validates the phone's cert against the Google Automotive Link CA — any cert signed by that CA is accepted. Some head units may not check certificate expiry, but this is not guaranteed for all models.
 
 #### Path A: Decrypt from the APK
 
@@ -125,7 +125,7 @@ See [`tools/decrypt_key_from_apk.md`](tools/decrypt_key_from_apk.md) for the ful
 
 #### Path B: Use a previously extracted cert+key
 
-Since head units don't check certificate expiry, any previously extracted cert+key pair (even expired) will work. Sources:
+Since some head units may not check certificate expiry, a previously extracted cert+key pair (even expired) may still work. Sources:
 
 1. **Contact opengal_proxy author** — email `som@marekkraus.sk` (see [gamelaster/opengal_proxy](https://github.com/gamelaster/opengal_proxy))
 2. **Extract from a rooted phone with GApps** — use Frida to hook `KeyFactory.generatePrivate()` (requires both root AND Google Play Services on the same device):
