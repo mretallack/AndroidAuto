@@ -90,6 +90,8 @@ The key is embedded (encrypted) in the Android Auto APK and can be decrypted usi
 
 **Important:** The APK must be pulled from a real phone (`adb pull`), not downloaded from APKPure/APKMirror. Download sites may cache old builds with stale byte arrays that won't decrypt.
 
+**Note:** The decryption step (step 4) only needs `dalvikvm` — any Android device with ADB works, no root or Google Play Services required. The GApps requirement is only for step 1 (pulling the APK, since the AA app is distributed via Play Store).
+
 **Critical JADX bug:** JADX decompiles the KDF helper as `byte b = bArr2[i2] & 255;` but it must be `int b = bArr2[i2] & 255;`. The `byte` type truncates back to signed, producing garbage output. Fix this to `int` and the decryption works.
 
 The KDF (`tweakBytes`/`ap`) function:
