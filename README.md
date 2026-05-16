@@ -68,9 +68,20 @@ The phone presents a 2-cert chain:
 1. **CarService cert** — `O=CarService`, signed by the Google Automotive Link CA
 2. **Google Automotive Link CA** — self-signed root, `O=Google Automotive Link` (valid 2014-2044)
 
+### How Authentication Works
+
+1. The head unit has the **Google Automotive Link CA** public key baked into its firmware and trusts it
+2. During TLS, the phone presents the **CarService cert** (which is signed by that CA)
+3. The phone proves ownership of the cert by signing the TLS handshake with the corresponding **private key**
+4. The head unit verifies the signature matches the cert's public key, and that the cert chains back to the trusted CA
+
+### Certificate Rotation (Theory — Unconfirmed)
+
+Google appears to rotate the cert+key embedded in the Android Auto APK approximately every 8 months (matching the cert's validity period). This may be a deliberate measure to limit the usefulness of extracted keys — if a head unit checks certificate expiry, an old extracted key would stop working. Users of the official app receive fresh certs via app updates. If this theory is correct, a user who never updates the official app could eventually be rejected by head units that enforce expiry. Not all head units may check expiry — this behaviour is model-dependent.
+
 ### Obtaining the Private Key
 
-The private key is AES-256-CBC encrypted inside the Android Auto APK. The head unit validates the phone's cert against the Google Automotive Link CA — any cert signed by that CA is accepted. Some head units may not check certificate expiry, but this is not guaranteed for all models.
+The private key is AES-256-CBC encrypted inside the Android Auto APK. The head unit validates the phone's cert against the Google Automotive Link CA — any cert signed by that CA is accepted.
 
 #### Path A: Decrypt from the APK
 
