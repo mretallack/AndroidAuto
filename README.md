@@ -77,8 +77,8 @@ The private key is AES-256-CBC encrypted inside the Android Auto APK. The head u
 The key is embedded (encrypted) in the Android Auto APK and can be decrypted using the APK's own algorithm. This requires any Android device with ADB access (no root, no Google Play Services needed) to run the decryption, because Android's Base64 decoder behaves differently from the desktop JVM.
 
 **Requirements:**
-- A phone with Google Play Services to pull the APK from (the AA app must be installed via Play Store)
-- Any Android device with ADB access to run the decryption (can be a different device)
+- The Android Auto APK (pull from a phone with `adb pull`, or download from APKPure/APKMirror)
+- Any Android device with ADB access to run the decryption (no root, no Google Play Services needed)
 - Android SDK (`d8` build tool, `adb`)
 
 **Process:**
@@ -121,14 +121,14 @@ adb shell "dalvikvm -cp /data/local/tmp/decrypt.dex Decrypt"
 
 This outputs the PKCS#8 private key in base64. Wrap it in PEM headers and place at `app/src/main/assets/carservice_key.pem`.
 
-See `tools/decrypt_key_from_apk.md` for detailed steps.
+See [`tools/decrypt_key_from_apk.md`](tools/decrypt_key_from_apk.md) for the full step-by-step guide.
 
 #### Path B: Use a previously extracted cert+key
 
 Since head units don't check certificate expiry, any previously extracted cert+key pair (even expired) will work. Sources:
 
 1. **Contact opengal_proxy author** — email `som@marekkraus.sk` (see [gamelaster/opengal_proxy](https://github.com/gamelaster/opengal_proxy))
-2. **Extract from a rooted phone with GApps** — use Frida to hook `KeyFactory.generatePrivate()`:
+2. **Extract from a rooted phone with GApps** — use Frida to hook `KeyFactory.generatePrivate()` (requires both root AND Google Play Services on the same device):
    ```bash
    frida -U -n "com.google.android.projection.gearhead" -l tools/dump_key_frida.js
    ```
