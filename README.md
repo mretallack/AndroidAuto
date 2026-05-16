@@ -95,11 +95,28 @@ The key is embedded (encrypted) in the Android Auto APK and can be decrypted usi
 **Process:**
 
 1. Pull the AA APK from a phone: `adb pull $(adb shell pm path com.google.android.projection.gearhead | grep base | cut -d: -f2) aa.apk`
-2. Decompile with JADX to find the cert provider class (contains a cert PEM string + two `byte[]` arrays)
+2. Decompile with JADX to find the cert provider class
 3. Extract the binary data (256-byte KDF salt + ~1712-byte encrypted key + cert PEMs)
 4. Compile the decryption Java class to DEX and run on-device with `dalvikvm`
 
+**Finding the cert provider class (step 2):**
+
+The class names are obfuscated and change between APK versions, but the structure is always the same. Search JADX for `"-----BEGIN CERTIFICATE-----"` — you'll find a small class implementing an interface with three methods:
+- `a()` → returns a `String` (the CarService cert PEM)
+- `b()` → returns a `byte[]` (~1712 bytes — the AES-encrypted private key)
+- `c()` → returns a `byte[]` (256 bytes — the KDF salt)
+
+Known class names by version:
+| APK Version | Cert provider class | Salt+key class | Decryption class |
+|---|---|---|---|
+| v6.4 | `SslWrapper` (fields `o`, `p`) | same class | `SslWrapper.m23915f()` |
+| v16.8 | `ivo` / `rqi` | `ivq` / `rql` (fields `b`, `c`) | `ivq.d()` |
+
+The decryption function is in a nearby class — search for `"AES/CBC/PKCS5Padding"` to find it. It takes the cert provider interface as a parameter.
+
 **Note:** The decryption step (step 4) only needs `dalvikvm` — any Android device with ADB works, no root or Google Play Services required. The GApps requirement is only for step 1 (pulling the APK, since the AA app is distributed via Play Store).
+
+**Note:** You don't modify or run the decompiled APK code. Instead, you write a standalone `Decrypt.java` class that reimplements the decryption logic, reads the extracted byte arrays from files, and has its own `main()` entry point. The decompiled source is only used as a reference to understand the algorithm and copy out the byte arrays. See [`tools/decrypt_key_from_apk.md`](tools/decrypt_key_from_apk.md) for the complete `Decrypt.java` source.
 
 **Critical JADX bug:** JADX decompiles the KDF helper as `byte b = bArr2[i2] & 255;` but it must be `int b = bArr2[i2] & 255;`. The `byte` type truncates back to signed, producing garbage output. Fix this to `int` and the decryption works.
 
