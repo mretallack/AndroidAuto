@@ -62,6 +62,8 @@ class VideoChannel(
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private var running = false
+    private var unackedFrames = 0
+    private val unackedLock = Object()
 
     fun setMediaProjection(projection: MediaProjection) {
         mediaProjection = projection
@@ -75,7 +77,7 @@ class VideoChannel(
             AVMessageType.STOP_INDICATION -> handleStopIndication()
             AVMessageType.VIDEO_FOCUS_REQUEST -> handleVideoFocusRequest(payload)
             AVMessageType.VIDEO_FOCUS_INDICATION -> handleVideoFocusIndication(payload)
-            AVMessageType.AV_MEDIA_ACK -> {} // Flow control
+            AVMessageType.AV_MEDIA_ACK -> handleMediaAck(payload)
             else -> Log.w(TAG, "Unknown video message: 0x${messageType.toString(16)}")
         }
     }
@@ -285,12 +287,22 @@ class VideoChannel(
     private fun startOutputLoop() {
         Thread {
             val bufferInfo = MediaCodec.BufferInfo()
+            val minFrameIntervalMs = 1000L / config.fps
+            var lastFrameTime = 0L
             while (running) {
                 val codec = encoder ?: break
                 val index = codec.dequeueOutputBuffer(bufferInfo, 10_000)
                 if (index >= 0) {
                     val outputBuffer = codec.getOutputBuffer(index) ?: continue
                     if (bufferInfo.size > 0) {
+                        // Throttle to target fps
+                        val now = System.currentTimeMillis()
+                        val elapsed = now - lastFrameTime
+                        if (elapsed < minFrameIntervalMs && lastFrameTime > 0) {
+                            Thread.sleep(minFrameIntervalMs - elapsed)
+                        }
+                        lastFrameTime = System.currentTimeMillis()
+
                         val data = ByteArray(bufferInfo.size)
                         outputBuffer.get(data)
                         sendVideoFrame(data, bufferInfo.presentationTimeUs)
@@ -305,7 +317,23 @@ class VideoChannel(
         }
     }
 
+    private fun handleMediaAck(payload: ByteArray) {
+        synchronized(unackedLock) {
+            unackedFrames = (unackedFrames - 1).coerceAtLeast(0)
+            (unackedLock as Object).notifyAll()
+        }
+    }
+
     private fun sendVideoFrame(nalData: ByteArray, timestampUs: Long) {
+        // Flow control: wait if too many unacked frames
+        synchronized(unackedLock) {
+            while (unackedFrames >= maxUnacked && running) {
+                try { (unackedLock as Object).wait(100) } catch (_: InterruptedException) {}
+            }
+            unackedFrames++
+        }
+        if (!running) return
+
         // AV_MEDIA_WITH_TIMESTAMP: [type:2][timestamp:8][data:N]
         val payload = ByteBuffer.allocate(2 + 8 + nalData.size).order(ByteOrder.BIG_ENDIAN)
             .putShort(AVMessageType.AV_MEDIA_WITH_TIMESTAMP.toShort())

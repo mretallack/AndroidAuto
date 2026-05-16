@@ -343,12 +343,12 @@ class ProtocolIntegrationTest {
         val request = byteArrayOf(0x08, 0x0A, 0x10, 0xE8.toByte(), 0x07) // type=10, interval=1000
         sensorChannel.onMessage(SensorMessageType.SENSOR_START_REQUEST, request)
 
-        // Should send SENSOR_START_RESPONSE + SENSOR_EVENT_INDICATION
+        // Should send SENSOR_START_RESPONSE + SENSOR_BATCH
         assertTrue(messages.size >= 2)
         val respType = ((messages[0][0].toInt() and 0xFF) shl 8) or (messages[0][1].toInt() and 0xFF)
         assertEquals(SensorMessageType.SENSOR_START_RESPONSE, respType)
         val eventType = ((messages[1][0].toInt() and 0xFF) shl 8) or (messages[1][1].toInt() and 0xFF)
-        assertEquals(SensorMessageType.SENSOR_EVENT_INDICATION, eventType)
+        assertEquals(SensorMessageType.SENSOR_BATCH, eventType)
     }
 
     // --- MESSAGE_UNEXPECTED_MESSAGE (0xFF) ---
@@ -408,6 +408,56 @@ class ProtocolIntegrationTest {
 
         // Cleanup
         videoChannel.stop()
+    }
+
+    // --- Sensor Channel ---
+
+    @Test
+    fun `sensor channel - request sensors and receive batch`() {
+        val messages = mutableListOf<ByteArray>()
+        val sensorChannel = SensorChannel(6u, object : SensorChannelCallback {
+            override fun onSendMessage(channelId: UByte, payload: ByteArray) { messages.add(payload) }
+        })
+
+        // 1. Request sensors (simulates what happens after channel opens)
+        sensorChannel.requestSensors()
+        assertEquals(2, messages.size) // DRIVING_STATUS + NIGHT_MODE requests
+
+        // 2. Head unit responds with SENSOR_START_RESPONSE (OK)
+        sensorChannel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+        sensorChannel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+
+        // 3. Head unit sends SENSOR_BATCH with night mode = false
+        val nightData = byteArrayOf(0x08, 0x00) // night_mode = false
+        val batch = byteArrayOf((10 shl 3 or 2).toByte(), nightData.size.toByte()) + nightData
+        sensorChannel.onMessage(SensorMessageType.SENSOR_BATCH, batch)
+
+        assertFalse(sensorChannel.isNight)
+
+        // 4. Head unit sends SENSOR_BATCH with driving status = UNRESTRICTED
+        val statusData = byteArrayOf(0x08, 0x00)
+        val statusBatch = byteArrayOf((13 shl 3 or 2).toByte(), statusData.size.toByte()) + statusData
+        sensorChannel.onMessage(SensorMessageType.SENSOR_BATCH, statusBatch)
+
+        assertEquals(0, sensorChannel.drivingStatus)
+    }
+
+    @Test
+    fun `sensor channel - responds to head unit sensor start request`() {
+        val messages = mutableListOf<ByteArray>()
+        val sensorChannel = SensorChannel(6u, object : SensorChannelCallback {
+            override fun onSendMessage(channelId: UByte, payload: ByteArray) { messages.add(payload) }
+        })
+
+        // Head unit asks us for NIGHT_MODE data
+        sensorChannel.onMessage(SensorMessageType.SENSOR_START_REQUEST, byteArrayOf(0x08, 0x0A, 0x10, 0x00))
+
+        // Should respond with SENSOR_START_RESPONSE + SENSOR_BATCH
+        assertTrue(messages.size >= 2)
+        val type0 = ((messages[0][0].toInt() and 0xFF) shl 8) or (messages[0][1].toInt() and 0xFF)
+        val type1 = ((messages[1][0].toInt() and 0xFF) shl 8) or (messages[1][1].toInt() and 0xFF)
+        assertEquals(SensorMessageType.SENSOR_START_RESPONSE, type0)
+        assertEquals(SensorMessageType.SENSOR_BATCH, type1)
     }
 
     // --- Full Flow Test ---

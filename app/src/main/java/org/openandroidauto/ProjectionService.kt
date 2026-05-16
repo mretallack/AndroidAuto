@@ -32,6 +32,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val writeQueue = CoChannel<ByteArray>(capacity = 64)
+    private val priorityWriteQueue = CoChannel<ByteArray>(capacity = 16)
     private var transport: Transport? = null
     private var protocolEngine: ProtocolEngine? = null
     private var inBandTls: InBandTls? = null
@@ -157,11 +158,20 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     private suspend fun writeLoop() {
         Log.w(TAG, "Write loop started")
         try {
-            for (frame in writeQueue) {
-                val hex = StringBuilder()
-                for (i in 0 until minOf(frame.size, 32)) { hex.append(String.format("%02x ", frame[i])) }
-                Log.w(TAG, "RAW → ${frame.size} bytes: $hex")
-                transport?.write(ByteBuffer.wrap(frame))
+            while (scope.isActive) {
+                // Priority queue first, then regular
+                val frame = priorityWriteQueue.tryReceive().getOrNull()
+                    ?: writeQueue.tryReceive().getOrNull()
+                if (frame != null) {
+                    transport?.write(ByteBuffer.wrap(frame))
+                } else {
+                    // Wait for either queue using select
+                    val selected = kotlinx.coroutines.selects.select<ByteArray> {
+                        priorityWriteQueue.onReceive { it }
+                        writeQueue.onReceive { it }
+                    }
+                    transport?.write(ByteBuffer.wrap(selected))
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Write loop error: ${e.message}")
@@ -271,7 +281,9 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         } else payload
         val useEncryptedFlag = shouldEncrypt && !isPlainMessage
         val frames = MessageFramer.encode(channelId, encrypted, control, encrypted = useEncryptedFlag)
-        frames.forEach { frame -> writeQueue.trySend(frame) }
+        // Control channel messages (pings, etc) go to priority queue
+        val queue = if (channelId.toInt() == 0) priorityWriteQueue else writeQueue
+        frames.forEach { frame -> queue.trySend(frame) }
     }
 
     override fun onTlsData(data: ByteArray) {
@@ -340,6 +352,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             delay(500)
             Log.w(TAG, "Opening channels on head unit...")
             if (videoChannelId > 0) protocolEngine?.sendChannelOpenRequest(videoChannelId)
+            if (audioChannelId > 0) protocolEngine?.sendChannelOpenRequest(audioChannelId)
             if (inputChannelId > 0) protocolEngine?.sendChannelOpenRequest(inputChannelId)
             if (sensorChannelId > 0) protocolEngine?.sendChannelOpenRequest(sensorChannelId)
         }
@@ -355,11 +368,29 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         if (channelId == videoChannelId) {
             videoChannel?.sendSetup()
         }
+        if (channelId == audioChannelId) {
+            // Send audio SETUP: MediaCodecType = MEDIA_CODEC_AUDIO_AAC_LC (2)
+            val setupPayload = byteArrayOf(0x08, 0x01) // MEDIA_CODEC_AUDIO_PCM = 1
+            val msg = java.nio.ByteBuffer.allocate(2 + setupPayload.size)
+                .order(java.nio.ByteOrder.BIG_ENDIAN)
+                .putShort(0x8000.toShort()) // MEDIA_MESSAGE_SETUP
+                .put(setupPayload)
+                .array()
+            Log.w(TAG, "Sending audio SETUP (PCM) on channel $channelId")
+            onSendFrame(channelId.toUByte(), msg, control = false)
+        }
     }
 
     override fun onActive() {
         Log.w(TAG, "Protocol ACTIVE - connection established!")
         updateNotification("Connected")
+        // Start sending periodic pings to keep connection alive
+        scope.launch {
+            while (scope.isActive) {
+                delay(1000)
+                protocolEngine?.sendPingRequest(System.currentTimeMillis() * 1000)
+            }
+        }
     }
 
     override fun onShutdown() {
