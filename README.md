@@ -55,15 +55,54 @@ This project is in early development. The protocol handshake and video projectio
 - [x] Night mode data parsing and sending
 - [x] Driving status data parsing and sending
 - [ ] GPS location forwarding
+- [ ] Compass heading
+- [ ] Car speed
+- [ ] RPM
+- [ ] Odometer (total + trip mileage)
+- [ ] Fuel level and range
+- [ ] Parking brake state
+- [ ] Gear position (P/R/N/D/1-10)
+- [ ] OBD-II diagnostics
+- [ ] Environment (temperature, pressure, rain)
+- [ ] HVAC (target/current temperature)
+- [ ] Dead reckoning
+- [ ] Passenger presence
+- [ ] Door state (hood, boot, individual doors)
+- [ ] Light state (headlights, indicators, hazards)
+- [ ] Tire pressure
+- [ ] Accelerometer (3-axis)
+- [ ] Gyroscope (3-axis)
+- [ ] GPS satellite data
 - [ ] Respond to head unit sensor requests proactively
 
+### Video (additional)
+- [ ] Resolution negotiation from head unit's service discovery
+- [ ] Adaptive bitrate based on connection quality
+- [ ] Support for 720p, 1080p, 1440p, 4K resolutions
+- [ ] Portrait mode resolutions (720x1280, 1080x1920, etc.)
+- [ ] UI config updates (theme, insets)
+
 ### Other
-- [ ] Bluetooth pairing coordination
+- [ ] Bluetooth pairing coordination (A2DP, HFP)
 - [ ] Navigation turn-by-turn to instrument cluster
+- [ ] Navigation state (maneuvers, lanes, distances, current position)
 - [ ] Media status (now playing info)
-- [ ] Phone status (call state)
+- [ ] Media playback metadata (track, artist, album)
+- [ ] Media browser (browse phone media library from head unit)
+- [ ] Phone status (call state notifications)
+- [ ] Generic notifications (subscribe/unsubscribe system)
 - [ ] Vendor extensions
 - [ ] Wireless Android Auto (WiFi + Bluetooth handoff)
+- [ ] Channel close notification
+- [ ] Car connected devices request/response
+- [ ] User switch request/response
+- [ ] Battery status notification
+- [ ] Call availability status
+- [ ] Service discovery update (dynamic channel changes)
+- [ ] Input feedback (haptic/visual feedback to head unit)
+- [ ] Microphone request/response (voice input from head unit)
+- [ ] Audio underflow notification
+- [ ] Radio service (AM/FM/HD/DAB tuning, presets, RDS)
 
 ## ⚠️ DISCLAIMER
 
@@ -119,6 +158,39 @@ Requires Android SDK with platform 35.
 - [tomasz-grobelny/AACS](https://github.com/tomasz-grobelny/AACS) (C++, GPL-3.0) — phone-side AA implementation for ODROID
 - [headunit-revived](https://github.com/andreknieriem/headunit-revived) (Kotlin, AGPL-3.0) — head-unit side implementation
 - [f1xpl/aasdk](https://github.com/f1xpl/aasdk) (C++, GPL-3.0) — original protocol library
+
+### Protobuf Definition Evolution
+
+The Android Auto protocol was reverse-engineered across several projects. Each built on the previous:
+
+| Project | Year | Proto Files | Role |
+|---------|------|-------------|------|
+| f1xpl/aasdk | 2018 | 1 monolithic (`Wifi.proto`) | Original RE — core protocol, video, audio, input, sensors |
+| AACS | 2020 | 28 (split by message) | Phone-side impl — minimal coverage for video projection |
+| opencardev/aasdk | 2024 | 254 (hierarchical by service) | Definitive reference — full protocol with all services |
+
+**What opencardev/aasdk adds over AACS:**
+- Radio service (AM/FM/HD/DAB tuning, presets, RDS, traffic)
+- Navigation status (full turn-by-turn: maneuvers, lanes, distances, cues)
+- Phone status (call state notifications)
+- Media browser (browse phone media library from head unit)
+- Media playback status (now playing metadata)
+- Generic notifications (subscribe/unsubscribe system)
+- WiFi projection (wireless AA credentials and access point config)
+- GAL verification (Google Automotive Link testing/debugging)
+- Instrument cluster (secondary display input)
+- UI config (theme day/night, insets, display configuration)
+- Battery status, user switch, toll card, EV connector types
+- Service discovery update (dynamic channel changes)
+- Extended video resolutions (1440p, portrait variants)
+- Extended control messages (26 types vs 13)
+
+**Key structural differences:**
+- AACS uses `priority` + `channel_id` in ChannelOpenRequest; aasdk uses `priority` (sint32) + `service_id`
+- AACS ServiceDiscoveryResponse is just a channel list; aasdk adds HeadUnitInfo, DriverPosition, PingConfiguration, ConnectionConfiguration
+- aasdk separates media into sink (head unit receives) and source (head unit sends) with distinct message IDs
+
+The `thirdparty/aasdk/protobuf/` directory is the authoritative protocol reference for this project.
 
 ## TLS Authentication
 
