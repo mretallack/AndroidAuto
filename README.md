@@ -4,7 +4,66 @@ An open-source implementation of the Android Auto **phone-side** app. This app r
 
 ## ⚠️ WORK IN PROGRESS
 
-This project is in early development. It is **not yet functional** with real head units. The protocol handshake is partially working but video projection, audio, and input are not yet operational in a real car environment.
+This project is in early development. The protocol handshake and video projection are working with a real head unit. The phone screen is successfully displayed on the car's head unit for several seconds before disconnecting (video stability is being improved).
+
+## Features
+
+### Protocol & Connection
+- [x] USB AOA accessory mode detection and connection
+- [x] TLS 1.2 mutual authentication (phone as server)
+- [x] Version negotiation (protocol v1.5)
+- [x] Service discovery (request/response)
+- [x] Channel open on target channels (video, audio, input, sensor)
+- [x] Ping/pong keepalive (bidirectional)
+- [x] Audio focus request/response handling
+- [x] Navigation focus request/response handling
+- [x] Voice session request handling
+- [x] Graceful shutdown handling
+- [x] Priority write queue (control messages over video)
+
+### Video Projection
+- [x] H.264 encoding via MediaCodec (800x480 @ 30fps, Baseline profile)
+- [x] MediaProjection screen capture (with user permission dialog)
+- [x] Video channel setup (SETUP → CONFIG → FOCUS → START flow)
+- [x] Zero-based timestamps in microseconds
+- [x] SPS/PPS prepended to keyframes (Annex B format)
+- [x] Flow control (max_unacked tracking, backpressure)
+- [x] Frame pacing (consistent 33ms intervals)
+- [ ] Stable long-running video (currently disconnects after ~7 seconds)
+- [ ] Resolution negotiation from head unit's service discovery
+- [ ] Adaptive bitrate based on connection quality
+
+### Touch Input
+- [x] Input channel open and binding request
+- [x] Touch event parsing (single and multi-touch)
+- [x] Key event parsing (buttons, media keys)
+- [x] Coordinate mapping (head unit → phone resolution)
+- [x] TouchInjector with MotionEvent creation
+- [ ] Inject touch events into VirtualDisplay
+- [ ] Key event injection into Android system
+
+### Audio
+- [x] Audio channel open and setup
+- [ ] Phone audio capture (MediaProjection AudioPlaybackCapture)
+- [ ] PCM/AAC encoding and streaming to head unit
+- [ ] Microphone input from head unit (voice commands)
+- [ ] Multiple audio channels (media, system, speech)
+
+### Sensors
+- [x] Sensor channel open
+- [x] Sensor start request/response handling
+- [x] Night mode data parsing and sending
+- [x] Driving status data parsing and sending
+- [ ] GPS location forwarding
+- [ ] Respond to head unit sensor requests proactively
+
+### Other
+- [ ] Bluetooth pairing coordination
+- [ ] Navigation turn-by-turn to instrument cluster
+- [ ] Media status (now playing info)
+- [ ] Phone status (call state)
+- [ ] Vendor extensions
+- [ ] Wireless Android Auto (WiFi + Bluetooth handoff)
 
 ## ⚠️ DISCLAIMER
 
@@ -50,11 +109,14 @@ Requires Android SDK with platform 35.
 ./gradlew testDebugUnitTest
 ```
 
-72 unit and integration tests covering protocol, framing, TLS, and channel logic.
+113 unit and integration tests covering protocol, framing, TLS, channel logic, video state machine, sensor handling, and touch input.
 
 ## Protocol References
 
 - [uglyoldbob/android-auto](https://github.com/uglyoldbob/android-auto) (Rust, LGPL-3.0) — protocol implementation with protobuf definitions
+- [opencardev/aasdk](https://github.com/opencardev/aasdk) (C++, GPL-3.0) — updated protocol library with full protobuf definitions
+- [opencardev/openauto](https://github.com/opencardev/openauto) (C++, GPL-3.0) — head-unit emulator (Crankshaft-NG)
+- [tomasz-grobelny/AACS](https://github.com/tomasz-grobelny/AACS) (C++, GPL-3.0) — phone-side AA implementation for ODROID
 - [headunit-revived](https://github.com/andreknieriem/headunit-revived) (Kotlin, AGPL-3.0) — head-unit side implementation
 - [f1xpl/aasdk](https://github.com/f1xpl/aasdk) (C++, GPL-3.0) — original protocol library
 
