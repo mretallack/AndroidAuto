@@ -14,3 +14,4 @@ local.properties
 /tools/jadx/
 venv/
 app/src/main/assets/carservice_key.pem
+thirdparty/

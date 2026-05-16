@@ -32,9 +32,14 @@ class ConnectionManagerTest {
         override fun onTlsData(data: ByteArray) {}
         override fun onTlsComplete() {}
         override fun onServiceDiscoveryRequest(deviceName: String, deviceBrand: String) {}
+        override fun onServiceDiscoveryResponse(channels: List<ChannelDescriptor>) {}
         override fun onChannelOpenRequest(channelId: Int, priority: Int) {}
+        override fun onChannelOpened(channelId: Int) {}
         override fun onActive() {}
         override fun onShutdown() {}
+        override fun onAudioFocusRequest(focusType: Int) {}
+        override fun onNavigationFocusRequest(type: Int) {}
+        override fun onVoiceSessionRequest(type: Int) {}
     }
 
     @Test

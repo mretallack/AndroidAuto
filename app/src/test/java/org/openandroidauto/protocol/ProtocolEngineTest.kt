@@ -31,8 +31,13 @@ class ProtocolEngineTest {
         override fun onChannelOpenRequest(channelId: Int, priority: Int) {
             channelOpenRequests.add(channelId to priority)
         }
+        override fun onServiceDiscoveryResponse(channels: List<ChannelDescriptor>) {}
+        override fun onChannelOpened(channelId: Int) {}
         override fun onActive() { activeCount++ }
         override fun onShutdown() { shutdownCount++ }
+        override fun onAudioFocusRequest(focusType: Int) {}
+        override fun onNavigationFocusRequest(type: Int) {}
+        override fun onVoiceSessionRequest(type: Int) {}
     }
 
     @Before
