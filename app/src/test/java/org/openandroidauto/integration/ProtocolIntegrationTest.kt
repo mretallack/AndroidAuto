@@ -360,6 +360,56 @@ class ProtocolIntegrationTest {
         engine.onMessage(0x00FF, ByteArray(0))
     }
 
+    // --- Video Start Flow ---
+
+    @Test
+    fun `video flow - setup config focus start`() {
+        val messages = mutableListOf<ByteArray>()
+        val frames = mutableListOf<ByteArray>()
+        val videoChannel = VideoChannel(1u, object : VideoChannelCallback {
+            override fun onVideoFrame(channelId: UByte, payload: ByteArray) { frames.add(payload) }
+            override fun onSendMessage(channelId: UByte, payload: ByteArray) { messages.add(payload) }
+        })
+
+        // 1. Phone sends SETUP
+        videoChannel.sendSetup()
+        assertEquals(VideoState.SETUP_SENT, videoChannel.state)
+        assertEquals(1, messages.size)
+        val setupType = ((messages[0][0].toInt() and 0xFF) shl 8) or (messages[0][1].toInt() and 0xFF)
+        assertEquals(AVMessageType.SETUP_REQUEST, setupType)
+
+        // 2. Head unit responds with CONFIG (STATUS_READY, max_unacked=100)
+        videoChannel.onMessage(AVMessageType.SETUP_RESPONSE, byteArrayOf(0x08, 0x02, 0x10, 0x64, 0x18, 0x00))
+        assertEquals(VideoState.CONFIGURED, videoChannel.state)
+        assertEquals(100, videoChannel.maxUnacked)
+
+        // 3. Head unit sends VIDEO_FOCUS_NOTIFICATION (PROJECTED)
+        messages.clear()
+        videoChannel.onMessage(AVMessageType.VIDEO_FOCUS_INDICATION, byteArrayOf(0x08, 0x01, 0x10, 0x01))
+        assertEquals(VideoState.STARTED, videoChannel.state)
+
+        // 4. Verify START was sent
+        val startMsg = messages.find {
+            val t = ((it[0].toInt() and 0xFF) shl 8) or (it[1].toInt() and 0xFF)
+            t == AVMessageType.START_INDICATION
+        }
+        assertNotNull("START_INDICATION should be sent", startMsg)
+
+        // 5. After a brief wait, black frames should be generated (no MediaProjection)
+        Thread.sleep(100)
+        assertTrue("Should have sent video frames", frames.isNotEmpty())
+
+        // 6. Verify frame format: [type:2][timestamp:8][data:N]
+        val frame = frames[0]
+        val buf = ByteBuffer.wrap(frame).order(ByteOrder.BIG_ENDIAN)
+        assertEquals(AVMessageType.AV_MEDIA_WITH_TIMESTAMP, buf.short.toInt() and 0xFFFF)
+        val timestamp = buf.long
+        assertTrue(timestamp >= 0)
+
+        // Cleanup
+        videoChannel.stop()
+    }
+
     // --- Full Flow Test ---
 
     @Test

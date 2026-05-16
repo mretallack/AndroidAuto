@@ -59,12 +59,26 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         super.onCreate()
         Log.w(TAG, "Service created")
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
+        startForeground(NOTIFICATION_ID, buildNotification("Connecting..."),
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         acquireWakeLock()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.w(TAG, "Service starting")
+        // Extract MediaProjection if provided
+        // Note: Activity.RESULT_OK = -1, so we use a different sentinel
+        val resultCode = intent?.getIntExtra(EXTRA_PROJECTION_RESULT_CODE, 0) ?: 0
+        @Suppress("DEPRECATION")
+        val projectionData: Intent? = intent?.getParcelableExtra(EXTRA_PROJECTION_DATA)
+        if (resultCode != 0 && projectionData != null) {
+            val projectionManager = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+            mediaProjection = projectionManager.getMediaProjection(resultCode, projectionData)
+            Log.w(TAG, "MediaProjection obtained successfully")
+        } else {
+            Log.w(TAG, "No MediaProjection - will send black frames")
+        }
         scope.launch { startSession() }
         return START_NOT_STICKY
     }
@@ -339,15 +353,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     override fun onChannelOpened(channelId: Int) {
         Log.w(TAG, "Channel $channelId opened successfully")
         if (channelId == videoChannelId) {
-            // Send MEDIA_MESSAGE_SETUP (0x8000) with MediaCodecType = VIDEO_H264_BP (3)
-            val setupPayload = byteArrayOf(0x08, 0x03) // field 1 (type) = 3 (H264_BP)
-            val msg = java.nio.ByteBuffer.allocate(2 + setupPayload.size)
-                .order(java.nio.ByteOrder.BIG_ENDIAN)
-                .putShort(0x8000.toShort()) // MEDIA_MESSAGE_SETUP
-                .put(setupPayload)
-                .array()
-            Log.w(TAG, "Sending video SETUP (H264_BP) on channel $channelId")
-            onSendFrame(channelId.toUByte(), msg, control = false)
+            videoChannel?.sendSetup()
         }
     }
 

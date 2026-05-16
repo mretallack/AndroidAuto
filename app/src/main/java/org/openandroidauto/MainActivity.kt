@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbAccessory
 import android.hardware.usb.UsbManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -25,10 +26,24 @@ class MainActivity : AppCompatActivity() {
         }.toTypedArray()
     }
 
+    private var serviceStarted = false
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ ->
-        startServiceIfAccessory()
+        requestScreenCapture()
+    }
+
+    private val screenCaptureLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            Log.w(TAG, "Screen capture permission granted")
+            startServiceWithProjection(result.resultCode, result.data!!)
+        } else {
+            Log.w(TAG, "Screen capture denied - starting service without projection")
+            startService()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,18 +71,35 @@ class MainActivity : AppCompatActivity() {
         if (missing.isNotEmpty()) {
             permissionLauncher.launch(missing.toTypedArray())
         } else {
-            startServiceIfAccessory()
+            requestScreenCapture()
         }
     }
 
-    private fun startServiceIfAccessory() {
+    private fun requestScreenCapture() {
         val accessory = UsbAoaTransport.findAccessory(this)
-        if (accessory != null) {
-            Log.w(TAG, "Starting ProjectionService for: ${accessory.manufacturer}/${accessory.model}")
-            startForegroundService(Intent(this, ProjectionService::class.java))
-            finish()
-        } else {
+        if (accessory == null) {
             Log.w(TAG, "No USB accessory found")
+            return
         }
+        val projectionManager = getSystemService(MediaProjectionManager::class.java)
+        screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+    }
+
+    private fun startServiceWithProjection(resultCode: Int, data: Intent) {
+        if (serviceStarted) return
+        serviceStarted = true
+        val serviceIntent = Intent(this, ProjectionService::class.java).apply {
+            putExtra(ProjectionService.EXTRA_PROJECTION_RESULT_CODE, resultCode)
+            putExtra(ProjectionService.EXTRA_PROJECTION_DATA, data)
+        }
+        startForegroundService(serviceIntent)
+        finish()
+    }
+
+    private fun startService() {
+        if (serviceStarted) return
+        serviceStarted = true
+        startForegroundService(Intent(this, ProjectionService::class.java))
+        finish()
     }
 }
