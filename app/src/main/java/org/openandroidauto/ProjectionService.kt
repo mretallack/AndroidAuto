@@ -162,29 +162,29 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
         // During TLS handshake, any data on channel 0 might be TLS records
         if (engineState == ProtocolState.TLS_HANDSHAKE && msg.channelId.toInt() == 0 && tls != null && !tls.isHandshakeComplete) {
-            // Check if this looks like a message type we know, or raw TLS data
             val possibleType = if (msg.payload.size >= 2) ((msg.payload[0].toInt() and 0xFF) shl 8) or (msg.payload[1].toInt() and 0xFF) else 0
             if (possibleType == ControlMessageType.SSL_HANDSHAKE) {
-                // Standard SSL_HANDSHAKE message
                 val tlsData = if (msg.payload.size > 2) msg.payload.copyOfRange(2, msg.payload.size) else ByteArray(0)
                 onTlsData(tlsData)
             } else {
-                // Could be encrypted TLS flight - feed entire payload to TLS engine
                 Log.w(TAG, "Feeding ${msg.payload.size} bytes to TLS (possible encrypted flight)")
                 onTlsData(msg.payload)
             }
             return
         }
 
-        // Decrypt only if frame has encrypted flag set (bit 3 of flags)
+        // Decrypt if frame has encrypted flag OR if payload starts with TLS record header (0x17 0x03)
         val isEncryptedFrame = (msg.flags.toInt() and 0x08) != 0
-        val payload = if (tls != null && tls.isHandshakeComplete && isEncryptedFrame && msg.payload.size > 2) {
+        val isTlsRecord = msg.payload.size > 5 && msg.payload[0].toInt() and 0xFF == 0x17 && msg.payload[1].toInt() and 0xFF == 0x03
+        val payload = if (tls != null && tls.isHandshakeComplete && (isEncryptedFrame || isTlsRecord)) {
             tls.decrypt(msg.payload)
         } else msg.payload
 
         if (payload.size < 2) return
         val type = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
         val msgPayload = if (payload.size > 2) payload.copyOfRange(2, payload.size) else ByteArray(0)
+
+        Log.w(TAG, "← ch=${msg.channelId} type=0x${type.toString(16)} len=${payload.size} enc=${isEncryptedFrame || isTlsRecord}")
 
         when (msg.channelId.toInt()) {
             0 -> protocolEngine?.onMessage(type, msgPayload)
@@ -201,8 +201,20 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             val type = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
             Log.w(TAG, "→ ch=$channelId type=0x${type.toString(16)} len=${payload.size} ctrl=$control")
         }
-        // Don't encrypt for now - head unit sends all frames unencrypted
-        val frames = MessageFramer.encode(channelId, payload, control, encrypted = false)
+        // Encrypt post-handshake messages (except SSL_HANDSHAKE and AUTH_COMPLETE which are PLAIN)
+        val tls = inBandTls
+        val shouldEncrypt = tls != null && tls.isHandshakeComplete &&
+            protocolEngine?.state != ProtocolState.TLS_HANDSHAKE
+        val type = if (payload.size >= 2) ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF) else 0
+        val isPlainMessage = type == ControlMessageType.SSL_HANDSHAKE ||
+            type == ControlMessageType.AUTH_COMPLETE ||
+            type == ControlMessageType.VERSION_REQUEST ||
+            type == ControlMessageType.VERSION_RESPONSE
+        val encrypted = if (shouldEncrypt && !isPlainMessage) {
+            tls!!.encrypt(payload)
+        } else payload
+        val useEncryptedFlag = shouldEncrypt && !isPlainMessage
+        val frames = MessageFramer.encode(channelId, encrypted, control, encrypted = useEncryptedFlag)
         frames.forEach { frame ->
             writeQueue.trySend(frame)
         }
