@@ -330,6 +330,36 @@ class ProtocolIntegrationTest {
         assertEquals(TouchAction.PRESS, events[0].action)
     }
 
+
+    // --- Input Injection Flow ---
+
+    @Test
+    fun `input flow - touch from head unit parsed and ready for injection`() {
+        val events = mutableListOf<InputEvent>()
+        val inputChannel = InputChannel(2u, object : InputChannelCallback {
+            override fun onTouchEvent(event: InputEvent) { events.add(event) }
+            override fun onKeyEvent(event: KeyEvent) {}
+            override fun onSendMessage(channelId: UByte, payload: ByteArray) {}
+        })
+
+        // Simulate head unit sending touch at (400, 240) with PRESS action
+        val touchLocation = byteArrayOf(
+            0x08, 0x90.toByte(), 0x03, // x = 400 (varint)
+            0x10, 0xF0.toByte(), 0x01, // y = 240 (varint)
+            0x18, 0x00                  // pointer_id = 0
+        )
+        val touchEvent = byteArrayOf(0x0A, touchLocation.size.toByte()) + touchLocation +
+            byteArrayOf(0x18, 0x00) // action = PRESS(0)
+        val inputEvent = byteArrayOf(0x08, 0x01, 0x1A, touchEvent.size.toByte()) + touchEvent
+
+        inputChannel.onMessage(InputMessageType.INPUT_EVENT_INDICATION, inputEvent)
+
+        assertEquals(1, events.size)
+        assertEquals(400, events[0].touchPoints[0].x)
+        assertEquals(240, events[0].touchPoints[0].y)
+        assertEquals(TouchAction.PRESS, events[0].action)
+    }
+
     // --- Sensor Channel ---
 
     @Test

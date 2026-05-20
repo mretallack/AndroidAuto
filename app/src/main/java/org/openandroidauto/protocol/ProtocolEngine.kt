@@ -73,7 +73,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
 
     companion object {
         const val PROTOCOL_VERSION_MAJOR = 1
-        const val PROTOCOL_VERSION_MINOR = 5
+        const val PROTOCOL_VERSION_MINOR = 7
         const val CONTROL_CHANNEL: UByte = 0u
     }
 
@@ -154,6 +154,14 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         val msg = buildMessage(ControlMessageType.AUDIO_FOCUS_RESPONSE, payload)
         Log.w(TAG, "Sending AUDIO_FOCUS_RESPONSE state=$focusState")
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = true)
+    }
+
+    fun sendAudioFocusRequest(focusType: Int) {
+        // AudioFocusRequest: field 1 (audio_focus_type) varint
+        val payload = byteArrayOf(0x08, focusType.toByte())
+        val msg = buildMessage(ControlMessageType.AUDIO_FOCUS_REQUEST, payload)
+        Log.w(TAG, "Sending AUDIO_FOCUS_REQUEST type=$focusType")
+        callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
     }
 
     fun sendNavigationFocusResponse(type: Int) {

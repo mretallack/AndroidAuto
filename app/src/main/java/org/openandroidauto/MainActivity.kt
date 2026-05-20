@@ -76,13 +76,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestScreenCapture() {
-        val accessory = UsbAoaTransport.findAccessory(this)
-        if (accessory == null) {
-            Log.w(TAG, "No USB accessory found")
-            return
-        }
-        val projectionManager = getSystemService(MediaProjectionManager::class.java)
-        screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+        // Skip screen capture prompt - using test pattern for video
+        startService()
     }
 
     private fun startServiceWithProjection(resultCode: Int, data: Intent) {
@@ -93,13 +88,14 @@ class MainActivity : AppCompatActivity() {
             putExtra(ProjectionService.EXTRA_PROJECTION_DATA, data)
         }
         startForegroundService(serviceIntent)
-        finish()
+        // Don't finish() - keep activity alive to prevent process throttling
+        moveTaskToBack(true)
     }
 
     private fun startService() {
         if (serviceStarted) return
         serviceStarted = true
         startForegroundService(Intent(this, ProjectionService::class.java))
-        finish()
+        moveTaskToBack(true)
     }
 }

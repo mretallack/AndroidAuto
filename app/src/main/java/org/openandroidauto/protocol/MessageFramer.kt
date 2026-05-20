@@ -76,7 +76,7 @@ object MessageFramer {
         }
     }
 
-    private fun buildFrame(header: FrameHeader, payload: ByteArray): ByteArray {
+    fun buildFrame(header: FrameHeader, payload: ByteArray): ByteArray {
         val buf = ByteBuffer.allocate(4 + payload.size).order(ByteOrder.BIG_ENDIAN)
         buf.put(header.channelId.toByte())
         buf.put(header.flags.toByte())
@@ -85,12 +85,13 @@ object MessageFramer {
         return buf.array()
     }
 
-    private fun buildFirstFrame(header: FrameHeader, payload: ByteArray, totalLength: Int): ByteArray {
+    fun buildFirstFrame(header: FrameHeader, payload: ByteArray, totalLength: Int): ByteArray {
+        // AACS format: [channel:1][flags:1][chunk_len:2][total_plaintext_len:4][encrypted_data:N]
         val buf = ByteBuffer.allocate(8 + payload.size).order(ByteOrder.BIG_ENDIAN)
         buf.put(header.channelId.toByte())
         buf.put(header.flags.toByte())
-        buf.putInt(totalLength)
         buf.putShort(payload.size.toShort())
+        buf.putInt(totalLength)
         buf.put(payload)
         return buf.array()
     }
@@ -122,9 +123,10 @@ object MessageFramer {
 
                 val payloadSize: Int
                 if (header.frameType == FrameHeader.FrameType.FIRST) {
+                    // AACS format: [chunk_len:2][total_plaintext_len:4][data]
                     if (data.remaining() < 6) { data.position(mark); break }
-                    data.getInt() // total message length (informational)
                     payloadSize = data.getShort().toInt() and 0xFFFF
+                    data.getInt() // total message length (informational)
                 } else {
                     payloadSize = data.getShort().toInt() and 0xFFFF
                 }

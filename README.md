@@ -11,7 +11,7 @@ This project is in early development. The protocol handshake and video projectio
 ### Protocol & Connection
 - [x] USB AOA accessory mode detection and connection
 - [x] TLS 1.2 mutual authentication (phone as server)
-- [x] Version negotiation (protocol v1.5)
+- [x] Version negotiation (protocol v1.7)
 - [x] Service discovery (request/response)
 - [x] Channel open on target channels (video, audio, input, sensor)
 - [x] Ping/pong keepalive (bidirectional)
@@ -20,6 +20,9 @@ This project is in early development. The protocol handshake and video projectio
 - [x] Voice session request handling
 - [x] Graceful shutdown handling
 - [x] Priority write queue (control messages over video)
+- [ ] Wait for audio focus grant before sending audio (500ms timeout per HUIG)
+- [ ] Bluetooth pairing exchange (BluetoothPairingRequest/Response)
+- [ ] Handle multiple USB reconnections without AOAP re-init
 
 ### Video Projection
 - [x] H.264 encoding via MediaCodec (800x480 @ 30fps, Baseline profile)
@@ -44,10 +47,13 @@ This project is in early development. The protocol handshake and video projectio
 
 ### Audio
 - [x] Audio channel open and setup
+- [ ] Wait for audio focus grant before sending audio (500ms timeout per HUIG)
+- [ ] Send AUDIO_FOCUS RELEASE on initial connect, then GAIN when playing
 - [ ] Phone audio capture (MediaProjection AudioPlaybackCapture)
 - [ ] PCM/AAC encoding and streaming to head unit
 - [ ] Microphone input from head unit (voice commands)
-- [ ] Multiple audio channels (media, system, speech)
+- [ ] Multiple audio channels (media, system, speech, guidance)
+- [ ] Audio silence streaming to keep channel active
 
 ### Sensors
 - [x] Sensor channel open
@@ -134,6 +140,27 @@ USB Plug-in → MainActivity → ProjectionService
                 (H.264)   (touch/keys)  (PCM)
 ```
 
+## Known Bugs
+
+- **Channel assignment assumes order** — We assign the first `av_channel` in SERVICE_DISCOVERY_RESPONSE as video and the second as audio. This works with the car head unit (channel 1 = video) but fails with openauto (channel 4 = audio, not video). Fix: parse the `stream_type` field inside `av_channel` to distinguish `VIDEO(3)` from `AUDIO(1)`.
+- **Video stability** — Connection drops after extended streaming due to head unit USB buffer overflow. See test results below.
+
+### Video Stability Test Results
+
+Test pattern (color bars) at 800x480, I-frame interval 1 second:
+
+| FPS | Bitrate | Fragment | Duration | Frames | Status |
+|-----|---------|----------|----------|--------|--------|
+| 30 | 2Mbps | No | ~3s | ~90 | ❌ Too fast |
+| 15 | 2Mbps | No | ~33s | ~500 | ⚠️ Better |
+| 10 | 2Mbps | No | ~93s | ~930 | ⚠️ Good |
+| 30 | 2Mbps | Yes (2KB) | 5-25s | 150-750 | ⚠️ Variable |
+| 30 | 500Kbps | Yes (2KB) | ~54s | ~1691 | ⚠️ Better |
+| 15 | 250Kbps | Yes (2KB) | ~67s+ | 1000+ | ✅ **Best so far** |
+| 30 | 250Kbps | Yes (2KB), I=5s | ~20s | ~600 | ❌ Worse with long I-frame |
+
+Root cause: Head unit USB receive buffer overflows with sustained high throughput. Lower data rate = longer connection.
+
 ## Building
 
 ```bash
@@ -144,11 +171,101 @@ Requires Android SDK with platform 35.
 
 ## Testing
 
+### Unit Tests
+
 ```bash
 ./gradlew testDebugUnitTest
 ```
 
 113 unit and integration tests covering protocol, framing, TLS, channel logic, video state machine, sensor handling, and touch input.
+
+### Integration Testing with openauto (Docker)
+
+openauto is a third-party head unit emulator that speaks the full Android Auto protocol. We use it to verify our protocol implementation without needing a real car.
+
+#### Prerequisites
+
+- Docker installed and running
+- Phone connected via ADB (USB or wireless)
+- App installed on phone: `./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk`
+
+#### 1. Build the openauto Docker image (one-time)
+
+```bash
+cd thirdparty/openauto
+docker build -f Dockerfile.headless -t openauto-headless .
+```
+
+This builds openauto with all dependencies (Qt5, boost, protobuf, OpenSSL) in a Debian container. Takes ~5 minutes on first build.
+
+#### 2. Start openauto
+
+```bash
+docker run --rm -p 5100:5000 -e QT_QPA_PLATFORM=offscreen \
+  openauto-headless timeout 60 /src/build/bin/autoapp
+```
+
+openauto listens on port 5000 inside the container, mapped to port 5100 on the host. It runs in headless mode (no display needed).
+
+#### 3. Set up ADB reverse port forwarding
+
+```bash
+adb reverse tcp:5000 tcp:5100
+```
+
+This makes the phone's `localhost:5000` tunnel to the computer's `localhost:5100` (openauto). Our app connects to `localhost:5000` as a TCP client when no USB accessory is found.
+
+#### 4. Start the app
+
+```bash
+adb shell am start -n org.openandroidauto/.MainActivity
+```
+
+The app will:
+1. Fail to find a USB accessory
+2. Connect to `localhost:5000` (openauto via adb reverse)
+3. Perform the full protocol handshake (VERSION → TLS → AUTH → SERVICE_DISCOVERY)
+4. Open channels (video, audio, input, sensor)
+5. Start streaming video (test pattern)
+
+#### 5. Verify in openauto logs
+
+You should see in the openauto output:
+```
+[OpenAuto] handleNewClient() - Handle WIFI Client Connection
+[OpenAuto] [AndroidAutoEntity] Send Version Request.
+[OpenAuto] [AndroidAutoEntity] onVersionResponse()
+[OpenAuto] [AndroidAutoEntity] Beginning SSL handshake.
+[OpenAuto] [AndroidAutoEntity] Handshake completed.
+[OpenAuto] [AndroidAutoEntity] onServiceDiscoveryRequest()
+[OpenAuto] [AndroidAutoEntity] onAudioFocusRequest()
+[OpenAuto] [AudioMediaSinkService] onChannelOpenRequest()
+[OpenAuto] [VideoMediaSinkService] onChannelOpenRequest() (if video focus granted)
+```
+
+#### 6. Retrieve app logs
+
+```bash
+adb pull /sdcard/Android/data/org.openandroidauto/files/aa_log.txt
+cat aa_log.txt
+```
+
+The log file persists on the phone between USB switches (useful when testing with a real car head unit).
+
+#### Quick one-liner test
+
+```bash
+# Assumes openauto image already built and app installed
+docker run --rm -p 5100:5000 -e QT_QPA_PLATFORM=offscreen openauto-headless timeout 20 /src/build/bin/autoapp &
+sleep 3 && adb reverse tcp:5000 tcp:5100 && adb shell am start -n org.openandroidauto/.MainActivity
+```
+
+#### Notes
+
+- openauto uses protocol v1.6; our app responds with v1.7 (both are accepted)
+- openauto logs `Message Id not Handled: 4` for AUTH_COMPLETE — this is a known openauto quirk, not an error
+- The connection should remain stable indefinitely (no timeout/disconnect)
+- Video is not displayed (headless mode) but the protocol exchange is fully validated
 
 ## Protocol References
 
@@ -158,6 +275,7 @@ Requires Android SDK with platform 35.
 - [tomasz-grobelny/AACS](https://github.com/tomasz-grobelny/AACS) (C++, GPL-3.0) — phone-side AA implementation for ODROID
 - [headunit-revived](https://github.com/andreknieriem/headunit-revived) (Kotlin, AGPL-3.0) — head-unit side implementation
 - [f1xpl/aasdk](https://github.com/f1xpl/aasdk) (C++, GPL-3.0) — original protocol library
+- [GAL protocol research](https://milek7.pl/.stuff/galdocs/readme.md) — protocol notes, Wireshark dissector, and cached Head Unit Integration Guide
 
 ### Protobuf Definition Evolution
 
