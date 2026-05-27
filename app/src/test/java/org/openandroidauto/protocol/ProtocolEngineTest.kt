@@ -55,7 +55,17 @@ class ProtocolEngineTest {
     fun `start moves to VERSION_NEGOTIATION`() {
         engine.start()
         assertEquals(ProtocolState.VERSION_NEGOTIATION, engine.state)
-        assertEquals(0, cb.sentFrames.size) // No frame sent, waiting for head unit
+        assertEquals(0, cb.sentFrames.size) // No frame sent yet, waiting for timeout or HU
+    }
+
+    @Test
+    fun `initiateVersionRequest sends VERSION_REQUEST`() {
+        engine.start()
+        engine.initiateVersionRequest()
+        assertEquals(1, cb.sentFrames.size)
+        val msg = cb.sentFrames[0].second
+        val type = ByteBuffer.wrap(msg).order(ByteOrder.BIG_ENDIAN).short.toInt() and 0xFFFF
+        assertEquals(ControlMessageType.VERSION_REQUEST, type)
     }
 
     @Test(expected = IllegalStateException::class)
@@ -151,6 +161,15 @@ class ProtocolEngineTest {
     fun `VERSION_REQUEST rejected in wrong state`() {
         // Don't call start(), state is IDLE
         engine.onMessage(ControlMessageType.VERSION_REQUEST, ByteArray(4))
+    }
+
+    @Test
+    fun `VERSION_RESPONSE from head unit transitions to TLS`() {
+        engine.start()
+        val payload = ByteBuffer.allocate(6).order(ByteOrder.BIG_ENDIAN)
+            .putShort(1).putShort(6).putShort(0).array() // v1.6, status=OK
+        engine.onMessage(ControlMessageType.VERSION_RESPONSE, payload)
+        assertEquals(ProtocolState.TLS_HANDSHAKE, engine.state)
     }
 
     @Test

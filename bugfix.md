@@ -85,6 +85,30 @@ Head unit disconnects (USB EIO) after video streaming starts. Duration varies fr
 | 21 | Reduce fps (15, 10) | **Helps** — 33s, 93s |
 | 22 | Fragment-before-encrypt (2KB chunks) | Works with openauto, **fails with car** |
 
+## Critical Tests (2026-05-22)
+
+### Our App: 10 Minutes Stable Without Video
+
+**Test:** Connected our app (Open Android Auto) to the head unit. Protocol handshake completed, head unit recognised the connection. Video stream was **not started**.
+
+**Result:** Stable for 10+ minutes with no disconnect.
+
+**Conclusion:** Confirms the existing finding — the connection is rock-solid without video. The disconnect is specifically triggered by video data.
+
+### Official App on Different Phone: 10 Minutes Stable With Video
+
+**Test:** Connected a different phone running the official Google Android Auto app, using the **same USB cable** and **same head unit**.
+
+**Result:** Stable for 10+ minutes with no disconnect (video streaming the whole time).
+
+**Conclusion:** This definitively rules out:
+- ❌ USB cable issues
+- ❌ Head unit USB buffer/hardware limitations
+- ❌ Head unit firmware bugs (it handles sustained video fine)
+- ❌ Any electrical/physical USB issue
+
+The problem is **100% in our app's software implementation**. The head unit is perfectly capable of sustained video streaming at full 30fps — the official app proves it. Something in our protocol handling, framing, or timing is wrong.
+
 ## What We've Ruled Out
 - ❌ Bandwidth overflow (5 KB/s still disconnects)
 - ❌ Flow control / max_unacked (never reached)
@@ -95,18 +119,21 @@ Head unit disconnects (USB EIO) after video streaming starts. Duration varies fr
 - ❌ Protocol version (v1.7 matches real app)
 - ❌ Codec config format (both with and without separate message fail)
 - ❌ Annex B vs AVCC (both work, head unit decodes fine)
+- ❌ USB cable/port (official app works 10+ min on same cable)
+- ❌ Head unit hardware limitation (official app proves it works)
+- ❌ Head unit firmware bug (sustained video works fine with official app)
 
 ## Remaining Hypotheses
 
-1. **USB bulk transfer size** — Individual large writes (5-15KB keyframes as single TLS records) may cause the head unit's USB controller to reset. The 10fps test worked longest because keyframes are spaced further apart (100ms vs 33ms at 30fps), giving the USB controller recovery time between large transfers.
+1. **TLS record size** — The head unit may have a maximum TLS record size it can buffer. A 15KB keyframe encrypted as one TLS record requires the head unit to buffer the entire record before decrypting. The official app likely fragments into smaller TLS records. This would explain why lower fps (fewer large keyframes per second) lasts longer.
 
-2. **TLS record size** — The head unit may have a maximum TLS record size it can buffer. A 15KB keyframe encrypted as one TLS record requires the head unit to buffer the entire record before decrypting. Smaller records (from lower bitrate) work longer.
+2. **Missing protocol message** — There may be a periodic message the real AA app sends during video streaming that we don't (e.g., a heartbeat on the video channel, periodic VIDEO_FOCUS renewal, or a media status update).
 
-3. **Head unit firmware bug** — The head unit may have a known issue with sustained video streaming. The real Google AA app might use a specific workaround we don't know about (e.g., periodic video STOP/START, or specific timing between frames).
+3. **ACK handling / flow control drift** — Our unacked counter or sequence numbering may drift over time, eventually confusing the head unit. The official app likely tracks ACKs differently.
 
-4. **Missing protocol message** — There may be a periodic message the real AA app sends during video streaming that we don't (e.g., a heartbeat on the video channel, or periodic VIDEO_FOCUS renewal).
+4. **Video frame format subtlety** — Something about our H.264 NAL unit packaging, timestamp progression, or frame flags that the head unit tolerates briefly but eventually rejects (e.g., timestamp wrap, missing end-of-stream markers, or incorrect frame type flags).
 
-5. **USB electrical/physical issue** — The USB cable or port may have marginal signal integrity that degrades under sustained high-frequency writes.
+5. **Write pattern / USB transfer timing** — The official app may batch or pace USB writes differently. Our app might be writing too many small packets or too few large ones, causing the head unit's USB stack to hit an edge case over time.
 
 ## Environment
 - Phone: Motorola Moto G52 (Android 14)

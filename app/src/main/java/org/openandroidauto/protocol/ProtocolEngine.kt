@@ -58,6 +58,10 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
 
     private val TAG = "AAProtocol"
 
+    var deviceName: String = "Open Android Auto"
+    var deviceBrand: String = "OpenAA"
+    var bluetoothAddress: String? = null
+
     var state: ProtocolState = ProtocolState.IDLE
         private set
 
@@ -79,8 +83,14 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
 
     fun start() {
         check(state == ProtocolState.IDLE) { "Cannot start in state $state" }
-        Log.w(TAG, "Protocol started, waiting for VERSION_REQUEST from head unit")
+        Log.w(TAG, "Protocol started in VERSION_NEGOTIATION")
         state = ProtocolState.VERSION_NEGOTIATION
+    }
+
+    /** Send VERSION_REQUEST to the head unit (call after a timeout if no HU message received) */
+    fun initiateVersionRequest() {
+        if (state != ProtocolState.VERSION_NEGOTIATION) return
+        sendVersionRequest()
     }
 
     fun onMessage(messageType: Int, payload: ByteArray) {
@@ -205,6 +215,12 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
 
     private fun handleVersionResponse(payload: ByteArray) {
         check(state == ProtocolState.VERSION_NEGOTIATION) { "Version response in wrong state: $state" }
+        if (payload.size >= 4) {
+            val major = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+            val minor = ((payload[2].toInt() and 0xFF) shl 8) or (payload[3].toInt() and 0xFF)
+            val status = if (payload.size >= 6) ((payload[4].toInt() and 0xFF) shl 8) or (payload[5].toInt() and 0xFF) else 0
+            Log.w(TAG, "Head unit version: $major.$minor status=$status")
+        }
         Log.w(TAG, "Version response received, moving to TLS_HANDSHAKE")
         state = ProtocolState.TLS_HANDSHAKE
     }
@@ -405,6 +421,16 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         callback.onTlsData(payload)
     }
 
+    private fun sendVersionRequest() {
+        val payload = ByteBuffer.allocate(4).order(ByteOrder.BIG_ENDIAN)
+            .putShort(PROTOCOL_VERSION_MAJOR.toShort())
+            .putShort(PROTOCOL_VERSION_MINOR.toShort())
+            .array()
+        val msg = buildMessage(ControlMessageType.VERSION_REQUEST, payload)
+        Log.w(TAG, "Sending VERSION_REQUEST v$PROTOCOL_VERSION_MAJOR.$PROTOCOL_VERSION_MINOR")
+        callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
+    }
+
     private fun sendVersionResponse() {
         val payload = ByteBuffer.allocate(6).order(ByteOrder.BIG_ENDIAN)
             .putShort(PROTOCOL_VERSION_MAJOR.toShort())
@@ -422,8 +448,8 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
     }
 
     private fun sendServiceDiscoveryRequest() {
-        val name = "Open Android Auto".toByteArray()
-        val brand = "OpenAA".toByteArray()
+        val name = deviceName.toByteArray()
+        val brand = deviceBrand.toByteArray()
         val out = java.io.ByteArrayOutputStream()
         // field 4 (device_name) = string
         out.write((4 shl 3) or 2) // tag: field 4, wire type 2
@@ -433,6 +459,19 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         out.write((5 shl 3) or 2) // tag: field 5, wire type 2
         writeVarint(out, brand.size.toLong())
         out.write(brand)
+        // field 6 (phone_info) = PhoneInfo { instance_id = BT MAC }
+        val btAddr = bluetoothAddress
+        if (btAddr != null) {
+            val phoneInfo = java.io.ByteArrayOutputStream()
+            val idBytes = btAddr.toByteArray()
+            phoneInfo.write((1 shl 3) or 2) // field 1 (instance_id), wire type 2
+            writeVarint(phoneInfo, idBytes.size.toLong())
+            phoneInfo.write(idBytes)
+            val phoneInfoBytes = phoneInfo.toByteArray()
+            out.write((6 shl 3) or 2) // field 6, wire type 2
+            writeVarint(out, phoneInfoBytes.size.toLong())
+            out.write(phoneInfoBytes)
+        }
         val msg = buildMessage(ControlMessageType.SERVICE_DISCOVERY_REQUEST, out.toByteArray())
         Log.w(TAG, "Sending SERVICE_DISCOVERY_REQUEST")
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)

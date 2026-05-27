@@ -144,6 +144,8 @@ USB Plug-in → MainActivity → ProjectionService
 
 - **Channel assignment assumes order** — We assign the first `av_channel` in SERVICE_DISCOVERY_RESPONSE as video and the second as audio. This works with the car head unit (channel 1 = video) but fails with openauto (channel 4 = audio, not video). Fix: parse the `stream_type` field inside `av_channel` to distinguish `VIDEO(3)` from `AUDIO(1)`.
 - **Video stability** — Connection drops after extended streaming due to head unit USB buffer overflow. See test results below.
+- **Duplicate device listing on head unit** — The head unit's smartphone page shows our app as two separate entries (one for Android Auto, one for Bluetooth) instead of a single entry with both capabilities. This is caused by Android 12+ blocking access to the real Bluetooth MAC address (returns `02:00:00:00:00:00`). Workaround: write the real address to a config file via `adb shell "echo $(adb shell settings get secure bluetooth_address) > /sdcard/Android/data/org.openandroidauto/files/bt_address.txt"`. Need a UI settings screen to let the user enter their BT MAC manually.
+- **Voice assistant button not handled** — When the driver presses the voice/assistant button on the head unit, we receive a VOICE_SESSION_REQUEST and attempt to launch a voice assistant (Dicio or system default). However, the launched assistant doesn't receive audio from the head unit's microphone yet.
 
 ### Video Stability Test Results
 
@@ -156,10 +158,13 @@ Test pattern (color bars) at 800x480, I-frame interval 1 second:
 | 10 | 2Mbps | No | ~93s | ~930 | ⚠️ Good |
 | 30 | 2Mbps | Yes (2KB) | 5-25s | 150-750 | ⚠️ Variable |
 | 30 | 500Kbps | Yes (2KB) | ~54s | ~1691 | ⚠️ Better |
-| 15 | 250Kbps | Yes (2KB) | ~67s+ | 1000+ | ✅ **Best so far** |
+| 15 | 250Kbps | Yes (2KB) | ~67s+ | 1000+ | ⚠️ Good |
 | 30 | 250Kbps | Yes (2KB), I=5s | ~20s | ~600 | ❌ Worse with long I-frame |
+| 15 | 250Kbps | No | ~13s | ~200 | ❌ Fragmentation helped here |
 
 Root cause: Head unit USB receive buffer overflows with sustained high throughput. Lower data rate = longer connection.
+
+**Best confirmed config:** 10fps, 2Mbps, no fragmentation = 93 seconds. Fragment-before-encrypt implementation is broken (head unit can't reassemble) — needs further investigation.
 
 ## Building
 

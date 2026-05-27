@@ -150,10 +150,10 @@ class VideoChannelTest {
     // --- Frame format ---
 
     @Test
-    fun `default config is 800x480 30fps`() {
+    fun `default config is 800x480 15fps`() {
         assertEquals(800, channel.config.width)
         assertEquals(480, channel.config.height)
-        assertEquals(30, channel.config.fps)
+        assertEquals(15, channel.config.fps)
     }
 
     @Test

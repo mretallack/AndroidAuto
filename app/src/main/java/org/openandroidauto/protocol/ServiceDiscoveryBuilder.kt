@@ -9,7 +9,7 @@ import java.io.ByteArrayOutputStream
 object ServiceDiscoveryBuilder {
 
     /**
-     * Build a complete ServiceDiscoveryResponse with video, audio, input, and sensor channels.
+     * Build a complete ServiceDiscoveryResponse with video, audio, input, sensor, and bluetooth channels.
      */
     fun build(
         headUnitName: String = "Open Android Auto",
@@ -19,7 +19,8 @@ object ServiceDiscoveryBuilder {
         manufacturer: String = "OpenAndroidAuto",
         model: String = "Phone",
         swBuild: String = "1",
-        swVersion: String = "0.1.0"
+        swVersion: String = "0.1.0",
+        bluetoothAddress: String? = null
     ): ByteArray {
         val out = ByteArrayOutputStream()
 
@@ -32,6 +33,10 @@ object ServiceDiscoveryBuilder {
         writeField(out, 1, buildInputChannelDescriptor())
         // Sensor channel (id=4)
         writeField(out, 1, buildSensorChannelDescriptor())
+        // Bluetooth channel (id=5)
+        if (bluetoothAddress != null) {
+            writeField(out, 1, buildBluetoothChannelDescriptor(bluetoothAddress))
+        }
 
         // head_unit_name (field 2)
         writeStringField(out, 2, headUnitName)
@@ -154,6 +159,24 @@ object ServiceDiscoveryBuilder {
     private fun sensorEntry(type: Int): ByteArray {
         val out = ByteArrayOutputStream()
         writeVarintField(out, 1, type)
+        return out.toByteArray()
+    }
+
+    private fun buildBluetoothChannelDescriptor(btAddress: String): ByteArray {
+        val out = ByteArrayOutputStream()
+        writeVarintField(out, 1, 5) // channel_id = 5
+        // bluetooth_service (field 6)
+        writeField(out, 6, buildBluetoothService(btAddress))
+        return out.toByteArray()
+    }
+
+    private fun buildBluetoothService(btAddress: String): ByteArray {
+        val out = ByteArrayOutputStream()
+        // car_address (field 1) = phone's BT MAC address
+        writeStringField(out, 1, btAddress)
+        // supported_pairing_methods (field 2, repeated varint)
+        writeVarintField(out, 2, 1) // HFP
+        writeVarintField(out, 2, 2) // A2DP
         return out.toByteArray()
     }
 

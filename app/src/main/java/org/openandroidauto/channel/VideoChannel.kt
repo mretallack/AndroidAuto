@@ -7,6 +7,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.projection.MediaProjection
 import android.util.Log
+import org.openandroidauto.ServiceState
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -254,11 +255,11 @@ class VideoChannel(
                             )
                         }
                         // Frame counter - only changes every 100 frames (slow update)
+                        paint.color = 0xFF000000.toInt()
+                        c.drawRect(0f, 30f, 250f, 70f, paint) // clear text area
                         paint.color = 0xFFFFFFFF.toInt()
                         paint.textSize = 40f
                         c.drawText("Frame: ${frameNum / 100 * 100}", 20f, 60f, paint)
-                        paint.textSize = 40f
-                        c.drawText("Frame: $frameNum", 20f, 60f, paint)
                         surface.unlockCanvasAndPost(c)
                         frameNum++
                     }
@@ -454,6 +455,10 @@ class VideoChannel(
     private fun sendVideoFrame(nalData: ByteArray, timestampUs: Long) {
         // Flow control: wait if too many unacked frames
         synchronized(unackedLock) {
+            if (unackedFrames >= maxUnacked) {
+                Log.w(TAG, "Flow control: waiting (unacked=$unackedFrames, max=$maxUnacked)")
+                ServiceState.addEvent("FLOW CTRL: blocked at $unackedFrames")
+            }
             while (unackedFrames >= maxUnacked && running) {
                 try { (unackedLock as Object).wait(100) } catch (_: InterruptedException) {}
             }

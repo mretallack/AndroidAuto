@@ -12,6 +12,7 @@ import android.os.PowerManager
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel as CoChannel
+import org.openandroidauto.ServiceState
 import org.openandroidauto.channel.*
 import org.openandroidauto.input.TouchInjector
 import org.openandroidauto.protocol.*
@@ -62,6 +63,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     private var inputChannelId: Int = -1
     private var audioChannelId: Int = -1
     private var sensorChannelId: Int = -1
+    private var btChannelId: Int = 5
+    private var bluetoothAddress: String? = null
     private var audioSilenceJob: kotlinx.coroutines.Job? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -115,6 +118,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 logW("Connecting to USB accessory...")
                 usbTransport.connect()
                 logW("USB connected successfully")
+        ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTING
+        ServiceState.addEvent("USB connected")
                 usbTransport
             } catch (e: Exception) {
                 // Try connecting to openauto/DHU on localhost:5000 (via adb reverse)
@@ -123,6 +128,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                     val tcpClient = TcpTransport("127.0.0.1", 5000)
                     tcpClient.connect()
                     logW("Connected to openauto via TCP")
+                    ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTING
+                    ServiceState.addEvent("TCP connected (openauto)")
                     tcpClient
                 } catch (e2: Exception) {
                     logW("No openauto, starting TCP server on port 5277 for DHU...")
@@ -140,10 +147,33 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             logW("TLS engine created (server mode, TLSv1.2)")
 
             transport = activeTransport
-            protocolEngine = ProtocolEngine(this)
+            protocolEngine = ProtocolEngine(this).apply {
+                // Use Bluetooth name to match what the head unit sees
+                val btAdapter = try {
+                    android.bluetooth.BluetoothAdapter.getDefaultAdapter()
+                } catch (_: SecurityException) { null }
+                val btName = try { btAdapter?.name } catch (_: SecurityException) { null }
+                val name = btName ?: android.os.Build.MODEL
+                deviceName = name
+                deviceBrand = name
+                // Get BT MAC address for pairing
+                this@ProjectionService.bluetoothAddress = getBluetoothAddress(btAdapter)
+                bluetoothAddress = this@ProjectionService.bluetoothAddress
+                logW("Bluetooth: name=$name address=${this@ProjectionService.bluetoothAddress}")
+            }
 
-            logW("Starting protocol - waiting for head unit VERSION_REQUEST")
+            logW("Starting protocol - sending VERSION_REQUEST to head unit")
             protocolEngine?.start()
+
+            // Send VERSION_REQUEST after a brief delay to allow head unit to send first
+            // (openauto sends VERSION_REQUEST; real car head units wait for phone to send it)
+            scope.launch {
+                delay(500)
+                if (protocolEngine?.state == ProtocolState.VERSION_NEGOTIATION) {
+                    logW("No VERSION_REQUEST from head unit, sending ours")
+                    protocolEngine?.initiateVersionRequest()
+                }
+            }
 
             scope.launch { writeLoop() }
             readLoop(activeTransport)
@@ -280,6 +310,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             inputChannelId -> inputChannel?.onMessage(type, msgPayload)
             audioChannelId -> audioOutputChannel?.onMessage(type, msgPayload)
             sensorChannelId -> sensorChannel?.onMessage(type, msgPayload)
+            btChannelId -> {
+                // BluetoothPairingResponse or other BT messages from head unit
+                logW("BT channel message: type=0x${type.toString(16)} len=${msgPayload.size}")
+            }
             else -> {
                 // Try matching by channel type if IDs not yet assigned
                 if (chId == 1) videoChannel?.onMessage(type, msgPayload)
@@ -293,6 +327,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     override fun onSendFrame(channelId: UByte, payload: ByteArray, control: Boolean) {
         framesSent++
+        ServiceState.framesSent.value = framesSent
         if (payload.size >= 2) {
             val type = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
             logW("→ ch=$channelId type=0x${type.toString(16)} len=${payload.size} ctrl=$control")
@@ -305,51 +340,13 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             type == ControlMessageType.AUTH_COMPLETE ||
             type == ControlMessageType.VERSION_REQUEST ||
             type == ControlMessageType.VERSION_RESPONSE
-
-        if (shouldEncrypt && !isPlainMessage) {
-            // Fragment-before-encrypt (AACS style):
-            // Split plaintext into 2KB chunks, encrypt each separately
-            val maxChunk = 2000
-            val totalPlaintextLength = payload.size
-            val queue = if (channelId.toInt() == 0) priorityWriteQueue else writeQueue
-
-            if (payload.size <= maxChunk) {
-                // Small message - encrypt and send as SINGLE (Bulk = First|Last)
-                val encrypted = tls!!.encrypt(payload)
-                val header = FrameHeader.create(channelId, FrameHeader.FrameType.SINGLE, control, encrypted = true)
-                val frame = MessageFramer.buildFrame(header, encrypted)
-                queue.trySend(frame)
-            } else {
-                // Large message - split, encrypt each chunk, FIRST/MIDDLE/LAST
-                val numChunks = (payload.size + maxChunk - 1) / maxChunk
-                for (i in 0 until numChunks) {
-                    val offset = i * maxChunk
-                    val end = minOf(offset + maxChunk, payload.size)
-                    val chunk = payload.copyOfRange(offset, end)
-                    val encrypted = tls!!.encrypt(chunk)
-
-                    val frameType = when {
-                        i == 0 -> FrameHeader.FrameType.FIRST
-                        i == numChunks - 1 -> FrameHeader.FrameType.LAST
-                        else -> FrameHeader.FrameType.MIDDLE
-                    }
-                    val header = FrameHeader.create(channelId, frameType, control, encrypted = true)
-                    val frame = if (i == 0) {
-                        // FIRST: [ch][flags][chunk_len:2][total_plaintext_len:4][encrypted]
-                        MessageFramer.buildFirstFrame(header, encrypted, totalPlaintextLength)
-                    } else {
-                        // MIDDLE/LAST: [ch][flags][chunk_len:2][encrypted]
-                        MessageFramer.buildFrame(header, encrypted)
-                    }
-                    queue.trySend(frame)
-                }
-            }
-        } else {
-            // Plain message
-            val frames = MessageFramer.encode(channelId, payload, control, encrypted = false)
-            val queue = if (channelId.toInt() == 0) priorityWriteQueue else writeQueue
-            frames.forEach { frame -> queue.trySend(frame) }
-        }
+        val encrypted = if (shouldEncrypt && !isPlainMessage) {
+            tls!!.encrypt(payload)
+        } else payload
+        val useEncryptedFlag = shouldEncrypt && !isPlainMessage
+        val frames = MessageFramer.encode(channelId, encrypted, control, encrypted = useEncryptedFlag)
+        val queue = if (channelId.toInt() == 0) priorityWriteQueue else writeQueue
+        frames.forEach { frame -> queue.trySend(frame) }
     }
 
     override fun onTlsData(data: ByteArray) {
@@ -379,7 +376,12 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     override fun onServiceDiscoveryRequest(deviceName: String, deviceBrand: String) {
         logW("Service discovery from: $deviceName ($deviceBrand)")
-        val response = ServiceDiscoveryBuilder.build()
+        // Get real Bluetooth MAC address for pairing
+        if (bluetoothAddress == null) {
+            bluetoothAddress = getBluetoothAddress(android.bluetooth.BluetoothAdapter.getDefaultAdapter())
+        }
+        logW("Bluetooth address for pairing: $bluetoothAddress")
+        val response = ServiceDiscoveryBuilder.build(bluetoothAddress = bluetoothAddress)
         logW("Sending service discovery response: ${response.size} bytes")
         protocolEngine?.sendServiceDiscoveryResponse(response)
     }
@@ -387,7 +389,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     override fun onServiceDiscoveryResponse(channels: List<ChannelDescriptor>) {
         logW("Service discovery response: ${channels.size} channels")
         for (ch in channels) {
-            logW("  Channel ${ch.channelId}: av=${ch.hasAv} input=${ch.hasInput} sensor=${ch.hasSensor} nav=${ch.hasNavigation}")
+            logW("  Channel ${ch.channelId}: av=${ch.hasAv} input=${ch.hasInput} sensor=${ch.hasSensor} nav=${ch.hasNavigation} bt=${ch.hasBluetooth}")
             when {
                 ch.hasAv && videoChannelId == -1 -> {
                     videoChannelId = ch.channelId
@@ -405,6 +407,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                     sensorChannel = SensorChannel(ch.channelId.toUByte(), this)
                     logW("  → Sensor channel assigned to ${ch.channelId}")
                 }
+                ch.hasBluetooth -> {
+                    btChannelId = ch.channelId
+                    logW("  → Bluetooth channel assigned to ${ch.channelId}")
+                }
                 ch.hasAv && videoChannelId != -1 && audioChannelId == -1 -> {
                     audioChannelId = ch.channelId
                     audioOutputChannel = AudioOutputChannel(ch.channelId.toUByte(), this)
@@ -420,53 +426,48 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             if (audioChannelId > 0) protocolEngine?.sendChannelOpenRequest(audioChannelId)
             if (inputChannelId > 0) protocolEngine?.sendChannelOpenRequest(inputChannelId)
             if (sensorChannelId > 0) protocolEngine?.sendChannelOpenRequest(sensorChannelId)
+            if (btChannelId > 0) protocolEngine?.sendChannelOpenRequest(btChannelId)
         }
     }
 
     private fun sendBluetoothPairingRequest() {
-        // BluetoothPairingRequest: field 1 (phone_address) string, field 2 (pairing_method) varint
-        // Use a dummy BT address - the head unit needs to see this message
-        val btAddr = "00:00:00:00:00:00".toByteArray()
+        val btAddr = bluetoothAddress ?: return
+        logW("Sending BluetoothPairingRequest with address=$btAddr on channel $btChannelId")
+        // BluetoothPairingRequest protobuf: field 1 (phone_address) string, field 2 (pairing_method) varint
+        val addrBytes = btAddr.toByteArray()
         val out = java.io.ByteArrayOutputStream()
-        // field 1: phone_address (string)
-        out.write((1 shl 3) or 2) // tag
-        out.write(btAddr.size)
-        out.write(btAddr)
+        // field 1: phone_address (string, wire type 2)
+        out.write((1 shl 3) or 2)
+        out.write(addrBytes.size)
+        out.write(addrBytes)
         // field 2: pairing_method = A2DP(2)
-        out.write((2 shl 3) or 0) // tag
-        out.write(2) // A2DP
+        out.write((2 shl 3) or 0)
+        out.write(2)
         val payload = out.toByteArray()
-        // BluetoothPairingRequest message type = 0x8001 on the bluetooth channel
-        // But we send it on control channel as per AACS
+        // Message type 0x8001 = PAIRING_REQUEST
         val msg = java.nio.ByteBuffer.allocate(2 + payload.size)
             .order(java.nio.ByteOrder.BIG_ENDIAN)
-            .putShort(0x8001.toShort()) // PAIRING_REQUEST
+            .putShort(0x8001.toShort())
             .put(payload)
             .array()
-        // Find bluetooth channel (channel 5 typically)
-        val btChannelId = protocolEngine?.discoveredChannels?.firstOrNull {
-            !it.hasAv && !it.hasInput && !it.hasSensor && !it.hasNavigation && it.channelId == 5
-        }?.channelId
-        if (btChannelId != null && btChannelId > 0) {
-            logW("Sending BluetoothPairingRequest on channel $btChannelId")
-            // Open BT channel first
-            protocolEngine?.sendChannelOpenRequest(btChannelId)
-            scope.launch {
-                delay(500)
-                onSendFrame(btChannelId.toUByte(), msg, control = false)
-            }
-        } else {
-            logW("No Bluetooth channel found, skipping pairing")
-        }
+        onSendFrame(btChannelId.toUByte(), msg, control = false)
     }
 
     override fun onChannelOpenRequest(channelId: Int, priority: Int) {
         logW("Channel open request: ch=$channelId priority=$priority")
         protocolEngine?.sendChannelOpenResponse(0) // OK
+        // If head unit opens the Bluetooth channel, send BluetoothPairingRequest
+        if (channelId == btChannelId) {
+            scope.launch {
+                delay(200)
+                sendBluetoothPairingRequest()
+            }
+        }
     }
 
     override fun onChannelOpened(channelId: Int) {
         logW("Channel $channelId opened successfully")
+        ServiceState.addEvent("Channel $channelId opened")
         if (channelId == videoChannelId) {
             videoChannel?.sendSetup()
         }
@@ -492,6 +493,9 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 .array()
             logW("Sending input BINDING_REQUEST on channel $channelId")
             onSendFrame(channelId.toUByte(), msg, control = false)
+        }
+        if (channelId == btChannelId) {
+            sendBluetoothPairingRequest()
         }
     }
 
@@ -530,6 +534,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     override fun onActive() {
         logW("Protocol ACTIVE - connection established!")
+        ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTED
+        ServiceState.addEvent("Protocol ACTIVE")
         updateNotification("Connected")
         // Send AUDIO_FOCUS_REQUEST (GAIN) - HUIG: MD MUST request focus before playing
         protocolEngine?.sendAudioFocusRequest(1) // GAIN=1
@@ -558,6 +564,46 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
     override fun onVoiceSessionRequest(type: Int) {
         logW("Voice session request: type=$type (1=start, 2=stop)")
+        if (type == 1) {
+            launchVoiceAssistant()
+        }
+    }
+
+    private fun launchVoiceAssistant() {
+        // Try launching voice assistants in priority order
+        val candidates = listOf(
+            "org.dicio.dicio_android",  // Dicio open-source assistant
+            "org.mozilla.firefox",       // Fallback - won't work but shows intent works
+        )
+        // First try the standard voice assist intent
+        val assistIntent = Intent(Intent.ACTION_VOICE_COMMAND).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        if (assistIntent.resolveActivity(packageManager) != null) {
+            logW("Launching voice assistant via ACTION_VOICE_COMMAND")
+            startActivity(assistIntent)
+            return
+        }
+        // Try ACTION_ASSIST
+        val assist2 = Intent(Intent.ACTION_ASSIST).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        if (assist2.resolveActivity(packageManager) != null) {
+            logW("Launching voice assistant via ACTION_ASSIST")
+            startActivity(assist2)
+            return
+        }
+        // Try known packages directly
+        for (pkg in candidates) {
+            val launchIntent = packageManager.getLaunchIntentForPackage(pkg)
+            if (launchIntent != null) {
+                logW("Launching voice assistant: $pkg")
+                launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                startActivity(launchIntent)
+                return
+            }
+        }
+        logW("No voice assistant found")
     }
 
     // --- VideoChannelCallback ---
@@ -606,5 +652,44 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "OpenAA::Projection").apply {
             acquire(4 * 60 * 60 * 1000L)
         }
+    }
+
+    private fun getBluetoothAddress(adapter: android.bluetooth.BluetoothAdapter?): String? {
+        val dummy = "02:00:00:00:00:00"
+        // Method 1: Read from config file (set via: adb shell "echo XX:XX:XX:XX:XX:XX > /sdcard/Android/data/org.openandroidauto/files/bt_address.txt")
+        try {
+            val file = java.io.File(getExternalFilesDir(null), "bt_address.txt")
+            if (file.exists()) {
+                val addr = file.readText().trim()
+                if (addr.isNotEmpty() && addr != dummy && addr.contains(":")) {
+                    logW("BT address from config file: $addr")
+                    return addr
+                }
+            }
+        } catch (_: Exception) {}
+        // Method 2: Reflection via BluetoothAdapter mService (Android 11 and below)
+        try {
+            val mServiceField = adapter?.javaClass?.getDeclaredField("mService")
+            mServiceField?.isAccessible = true
+            val btService = mServiceField?.get(adapter) ?: throw Exception("mService null")
+            val method = btService.javaClass.getMethod("getAddress")
+            val addr = method.invoke(btService) as? String
+            if (addr != null && addr != dummy && addr.contains(":")) {
+                logW("BT address from mService: $addr")
+                return addr
+            }
+        } catch (_: Exception) {}
+        // Method 3: Settings.Secure (targetSdk <= 31 only)
+        try {
+            val addr = android.provider.Settings.Secure.getString(contentResolver, "bluetooth_address")
+            if (addr != null && addr != dummy) {
+                logW("BT address from Settings.Secure: $addr")
+                return addr
+            }
+        } catch (_: Exception) {}
+        // Fallback
+        val addr = try { adapter?.address } catch (_: SecurityException) { null }
+        logW("BT address fallback: $addr (likely dummy)")
+        return addr
     }
 }
