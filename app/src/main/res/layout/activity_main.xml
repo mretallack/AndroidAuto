@@ -185,6 +185,34 @@
             </LinearLayout>
         </LinearLayout>
 
+        <!-- Vehicle Data Section -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#FF16213E"
+            android:padding="12dp"
+            android:layout_marginBottom="12dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Vehicle Data (from HU)"
+                android:textSize="14sp"
+                android:textColor="#FF888888"
+                android:textStyle="bold"
+                android:paddingBottom="8dp"/>
+
+            <TextView
+                android:id="@+id/tvSensorData"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Waiting for sensor data..."
+                android:textSize="12sp"
+                android:textColor="#FF4EC9B0"
+                android:fontFamily="monospace"/>
+        </LinearLayout>
+
         <!-- Event Log -->
         <LinearLayout
             android:layout_width="match_parent"

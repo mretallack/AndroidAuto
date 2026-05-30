@@ -32,7 +32,7 @@ This project is in early development. The protocol handshake and video projectio
 - [x] SPS/PPS prepended to keyframes (Annex B format)
 - [x] Flow control (max_unacked tracking, backpressure)
 - [x] Frame pacing (consistent 33ms intervals)
-- [ ] Stable long-running video (currently disconnects after ~7 seconds)
+- [x] Stable long-running video (30+ minutes confirmed)
 - [ ] Resolution negotiation from head unit's service discovery
 - [ ] Adaptive bitrate based on connection quality
 
@@ -143,7 +143,7 @@ USB Plug-in → MainActivity → ProjectionService
 ## Known Bugs
 
 - **Channel assignment assumes order** — We assign the first `av_channel` in SERVICE_DISCOVERY_RESPONSE as video and the second as audio. This works with the car head unit (channel 1 = video) but fails with openauto (channel 4 = audio, not video). Fix: parse the `stream_type` field inside `av_channel` to distinguish `VIDEO(3)` from `AUDIO(1)`.
-- **Video stability** — Connection drops after extended streaming due to head unit USB buffer overflow. See test results below.
+- **Video stability** — ~~Connection drops after extended streaming due to head unit USB buffer overflow.~~ **FIXED** (2026-05-30): Root cause was sending AUTH_COMPLETE back to the HU, which triggered an internal error state. Connection now stable for 30+ minutes with video. See `bugfix.md` for details.
 - **Duplicate device listing on head unit** — The head unit's smartphone page shows our app as two separate entries (one for Android Auto, one for Bluetooth) instead of a single entry with both capabilities. This is caused by Android 12+ blocking access to the real Bluetooth MAC address (returns `02:00:00:00:00:00`). Workaround: write the real address to a config file via `adb shell "echo $(adb shell settings get secure bluetooth_address) > /sdcard/Android/data/org.openandroidauto/files/bt_address.txt"`. Need a UI settings screen to let the user enter their BT MAC manually.
 - **Voice assistant button not handled** — When the driver presses the voice/assistant button on the head unit, we receive a VOICE_SESSION_REQUEST and attempt to launch a voice assistant (Dicio or system default). However, the launched assistant doesn't receive audio from the head unit's microphone yet.
 

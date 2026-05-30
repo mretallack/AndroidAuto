@@ -7,6 +7,7 @@ import org.junit.Before
 import org.junit.Test
 import org.openandroidauto.channel.*
 import org.openandroidauto.protocol.*
+import org.openandroidauto.ServiceState
 import org.openandroidauto.transport.TcpTransport
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -102,12 +103,12 @@ class ProtocolIntegrationTest {
     // --- Auth ---
 
     @Test
-    fun `AUTH_COMPLETE triggers response and SERVICE_DISCOVERY_REQUEST`() {
+    fun `AUTH_COMPLETE triggers SERVICE_DISCOVERY_REQUEST`() {
         advanceToServiceDiscovery()
 
-        // Should have sent AUTH_COMPLETE response
+        // Should NOT send AUTH_COMPLETE back (HU doesn't expect it)
         val authSent = cb.findSent(0, ControlMessageType.AUTH_COMPLETE)
-        assertNotNull("AUTH_COMPLETE response should be sent", authSent)
+        assertNull("AUTH_COMPLETE should NOT be sent back to HU", authSent)
 
         // Should have sent SERVICE_DISCOVERY_REQUEST
         val discoverySent = cb.findSent(0, ControlMessageType.SERVICE_DISCOVERY_REQUEST)
@@ -450,8 +451,8 @@ class ProtocolIntegrationTest {
         })
 
         // 1. Request sensors (simulates what happens after channel opens)
-        sensorChannel.requestSensors()
-        assertEquals(2, messages.size) // DRIVING_STATUS + NIGHT_MODE requests
+        sensorChannel.requestDefaultSensors()
+        assertEquals(3, messages.size) // DRIVING_STATUS + NIGHT_MODE + LOCATION requests
 
         // 2. Head unit responds with SENSOR_START_RESPONSE (OK)
         sensorChannel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
@@ -462,14 +463,14 @@ class ProtocolIntegrationTest {
         val batch = byteArrayOf((10 shl 3 or 2).toByte(), nightData.size.toByte()) + nightData
         sensorChannel.onMessage(SensorMessageType.SENSOR_BATCH, batch)
 
-        assertFalse(sensorChannel.isNight)
+        assertFalse(ServiceState.sensorNightMode.value)
 
         // 4. Head unit sends SENSOR_BATCH with driving status = UNRESTRICTED
         val statusData = byteArrayOf(0x08, 0x00)
         val statusBatch = byteArrayOf((13 shl 3 or 2).toByte(), statusData.size.toByte()) + statusData
         sensorChannel.onMessage(SensorMessageType.SENSOR_BATCH, statusBatch)
 
-        assertEquals(0, sensorChannel.drivingStatus)
+        assertEquals(0, ServiceState.sensorDrivingStatus.value)
     }
 
     @Test

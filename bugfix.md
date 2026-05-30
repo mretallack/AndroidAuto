@@ -4,7 +4,7 @@
 Head unit disconnects (USB EIO) after video streaming starts. Duration varies from 3-93 seconds depending on configuration. Video IS displayed correctly on the head unit during streaming. Connection is stable indefinitely when video is NOT streaming.
 
 ## Root Cause
-**Unknown.** Initially appeared to be bandwidth-related (lower fps = longer duration), but further testing shows even very low data rates (5 KB/s) still disconnect. The disconnect is specifically triggered by sending video data, regardless of rate.
+**Likely found.** The phone was sending AUTH_COMPLETE (message 0x04) back to the head unit after receiving the HU's AUTH_COMPLETE. The HU does not expect this message and responded with MESSAGE_UNEXPECTED_MESSAGE (0x00FF). This put the HU into an internal error state that caused it to disconnect after a timeout (~8.5 min without video, ~51s with video). Removing the AUTH_COMPLETE response fixed the idle disconnect — connection now stable for 30+ minutes without video. Video streaming tested for 200 frames (~13s) without error but needs longer test to confirm fully resolved.
 
 ## Confirmed Facts
 - Connection is **stable indefinitely** without video (pings + audio silence work forever)
@@ -113,27 +113,91 @@ The problem is **100% in our app's software implementation**. The head unit is p
 - ❌ Bandwidth overflow (5 KB/s still disconnects)
 - ❌ Flow control / max_unacked (never reached)
 - ❌ Ping timeout (pings answered correctly, priority queue)
-- ❌ Missing sensor data (NACKed — head unit doesn't want it from us)
-- ❌ Missing Bluetooth pairing (NACKed — not expected)
+- ❌ Missing sensor data (now subscribing — HU sends data, still disconnects)
+- ❌ Missing Bluetooth pairing (working — HU responds already_paired=true)
 - ❌ Audio channel timeout (audio silence doesn't help during video)
+- ❌ Audio focus wrong (changed to RELEASE on connect — still disconnects)
 - ❌ Protocol version (v1.7 matches real app)
 - ❌ Codec config format (both with and without separate message fail)
 - ❌ Annex B vs AVCC (both work, head unit decodes fine)
 - ❌ USB cable/port (official app works 10+ min on same cable)
 - ❌ Head unit hardware limitation (official app proves it works)
 - ❌ Head unit firmware bug (sustained video works fine with official app)
+- ❌ Video-only issue (disconnects after 8.5 min even without video)
 
 ## Remaining Hypotheses
 
-1. **TLS record size** — The head unit may have a maximum TLS record size it can buffer. A 15KB keyframe encrypted as one TLS record requires the head unit to buffer the entire record before decrypting. The official app likely fragments into smaller TLS records. This would explain why lower fps (fewer large keyframes per second) lasts longer.
+1. **The 0x00FF message / SERVICE_DISCOVERY_REQUEST format error** — The HU sends "unexpected message" (0x00FF) immediately after our SERVICE_DISCOVERY_REQUEST. This may indicate our request format is wrong (bad field, extra data, or wrong timing). The HU may tolerate this initially but eventually disconnect. The official app likely sends a correctly-formatted request that doesn't trigger 0x00FF.
 
-2. **Missing protocol message** — There may be a periodic message the real AA app sends during video streaming that we don't (e.g., a heartbeat on the video channel, periodic VIDEO_FOCUS renewal, or a media status update).
+2. **TLS record size** — Large video keyframes (~5KB) encrypted as single TLS records may overflow the HU's TLS receive buffer. This would explain why video accelerates the disconnect (51s vs 511s). The official app likely fragments into smaller TLS records.
 
-3. **ACK handling / flow control drift** — Our unacked counter or sequence numbering may drift over time, eventually confusing the head unit. The official app likely tracks ACKs differently.
+3. **Missing protocol message during streaming** — There may be a periodic message the real AA app sends that we don't (e.g., media status update, video channel heartbeat, or periodic VIDEO_FOCUS renewal).
 
-4. **Video frame format subtlety** — Something about our H.264 NAL unit packaging, timestamp progression, or frame flags that the head unit tolerates briefly but eventually rejects (e.g., timestamp wrap, missing end-of-stream markers, or incorrect frame type flags).
+4. **ACK handling / flow control drift** — Our unacked counter or sequence numbering may drift over time, eventually confusing the head unit.
 
-5. **Write pattern / USB transfer timing** — The official app may batch or pace USB writes differently. Our app might be writing too many small packets or too few large ones, causing the head unit's USB stack to hit an edge case over time.
+5. **Write pattern / USB transfer timing** — The official app may batch or pace USB writes differently.
+
+## Changes Applied (2026-05-27)
+
+### 1. Fragment-before-encrypt rewrite
+Previous implementation sent each 2KB chunk as an independent SINGLE frame. The head unit couldn't reassemble them because each was a complete message.
+
+**New approach:** Uses AAP multi-frame protocol (FIRST/MIDDLE/LAST frame types) with total message length in the FIRST frame header. Each chunk is TLS-encrypted independently (small TLS records), but the frame headers tell the head unit to reassemble the decrypted chunks into the original video message.
+
+### 2. Settings persistence
+Settings (test pattern, fragment, audio, sensor toggles) are now saved to SharedPreferences. Previously all settings were lost when the app was killed/restarted.
+
+### 3. USB re-detection without app restart
+- Added BroadcastReceiver for USB_ACCESSORY_ATTACHED/DETACHED
+- onResume() re-checks for USB accessory
+- serviceStarted auto-resets when connection goes to DISCONNECTED/ERROR
+- No longer need to close and reopen the app after USB reconnection
+
+### 4. Real Bluetooth MAC address
+`BluetoothAdapter.getAddress()` returns `02:00:00:00:00:00` on Android 6+. Now reads the real MAC from `Settings.Secure.getString(contentResolver, "bluetooth_address")` which returns the actual address (confirmed: `6C:97:6D:93:3E:1F`).
+
+### Test Results (2026-05-29)
+
+**Test 1: No video (audio-only AA mode)**
+- Duration: **8 minutes 31 seconds** (511s)
+- Pings flowing bidirectionally (1/sec), all channels open
+- HU sent AUDIO_FOCUS_RESPONSE (GAIN) then revoked it 13s later (STATE_LOSS unsolicited)
+- HU sent 0x00FF ("unexpected message") after our SERVICE_DISCOVERY_REQUEST
+- Disconnect: HU stopped responding to pings, then EIO 1s later
+- **Conclusion:** Connection still drops without video. Not a video-specific issue.
+
+**Test 2: With video (fragment-before-encrypt ON, test pattern)**
+- Duration: **51 seconds**
+- Video streaming at 15fps (5KB keyframes + 42B P-frames)
+- Sensor data flowing: DRIVING_STATUS=UNRESTRICTED, NIGHT_MODE=DAY, GPS every 1s
+- GPS confirmed working: Wool, Dorset (50.68°N, -2.22°W)
+- Disconnect: EIO during active video streaming
+- **Conclusion:** Video accelerates disconnect (51s vs 511s without video)
+
+**Key finding:** The AUDIO_FOCUS RELEASE fix and SENSOR_START_REQUEST fix did NOT prevent the disconnect. The HU still drops the connection. The 0x00FF message after SERVICE_DISCOVERY_REQUEST is suspicious — may indicate a protocol error that eventually causes disconnect.
+
+## Changes Applied (2026-05-29)
+
+### 5. Audio Focus RELEASE on connect
+HUIG requires: "User launches AAP → MD sends RELEASE request to HU so the HU has default audio focus." Previously we sent GAIN immediately, which confused the HU's audio state machine.
+
+### 6. Sensor subscription (SENSOR_START_REQUEST)
+Phone now requests DRIVING_STATUS, NIGHT_MODE, and LOCATION from the HU after sensor channel opens. Previously we opened the channel but never subscribed — HU was waiting for us.
+
+### 7. Full sensor data parsing (all 22 types)
+Rewrote SensorChannel to parse all sensor types from SensorBatch messages. Values displayed in app UI (Vehicle Data section). Fixed GPS longitude parsing bug (protobuf int32 sign extension).
+
+### 8. GPS parsing fix
+Protobuf `int32` negative values (e.g., western longitudes) are encoded as 10-byte varints (sign-extended to 64 bits). Was reading as unsigned Long → garbage. Fix: `.toInt()` truncates back to signed 32-bit.
+
+## Remaining Investigation
+
+The 0x00FF message received immediately after SERVICE_DISCOVERY_REQUEST needs investigation. This may indicate:
+- Our SERVICE_DISCOVERY_REQUEST protobuf format is wrong
+- We're sending it at the wrong time (before the HU expects it)
+- A field value the HU doesn't recognize
+
+The disconnect pattern (HU stops responding to pings, then drops USB) suggests the HU's internal state machine reaches an error state and gives up. The 0x00FF at connection start may be setting a "tolerate errors" timer.
 
 ## Environment
 - Phone: Motorola Moto G52 (Android 14)
@@ -147,3 +211,32 @@ The problem is **100% in our app's software implementation**. The head unit is p
 - **File logging**: Persists to `/sdcard/Android/data/org.openandroidauto/files/aa_log.txt`
 - **Debug UI**: Live status, frame counter, event log, toggle switches on phone screen
 - **Test pattern**: Static color bars with slow frame counter (minimal encoder load)
+
+## Test Log
+
+### 2026-05-29
+
+**Changes to test:**
+1. Removed AUTH_COMPLETE sent from phone → HU (was triggering 0x00FF MESSAGE_UNEXPECTED_MESSAGE)
+2. Audio focus RELEASE on connect (instead of GAIN)
+3. Sensor subscription (SENSOR_START_REQUEST for DRIVING_STATUS, NIGHT_MODE, LOCATION)
+4. GPS parsing fix (int32 sign extension)
+
+**Previous results today:**
+- Without video: 8 min 31 sec before disconnect
+- With video (fragment ON): 51 sec before disconnect
+- Sensor data confirmed working (GPS: Wool, Dorset ✓)
+- 0x00FF received after our AUTH_COMPLETE — now removed
+
+**Next test:** Verify 0x00FF is gone. If connection still drops, the AUTH_COMPLETE was not the cause and we need to look elsewhere (TLS record size, missing periodic message, or something in our SERVICE_DISCOVERY_REQUEST format).
+
+### 2026-05-30
+
+**Result: ✅ FIXED**
+
+- No 0x00FF message — AUTH_COMPLETE removal confirmed as the cause
+- **30+ minutes stable without video** (was 8.5 min before)
+- **200 frames of video streamed without error** (was 51 sec before disconnect)
+- User disconnected manually — HU did not drop the connection
+
+**Root cause confirmed:** Sending AUTH_COMPLETE back to the head unit triggered MESSAGE_UNEXPECTED_MESSAGE (0x00FF) which put the HU into an error state. The HU tolerated this temporarily but eventually disconnected (~8.5 min idle, ~51s under video load). The official Google AA app does NOT send AUTH_COMPLETE back to the HU — only the HU sends it to the phone.

@@ -247,7 +247,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             callback.onShutdown()
             return
         }
-        sendAuthComplete()
+        // Don't send AUTH_COMPLETE back — HU doesn't expect it (causes 0x00FF)
         sendServiceDiscoveryRequest()
     }
 

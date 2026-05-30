@@ -1,6 +1,7 @@
 package org.openandroidauto
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbAccessory
@@ -34,6 +35,22 @@ class MainActivity : AppCompatActivity() {
 
     private var serviceStarted = false
 
+    private val usbReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                UsbManager.ACTION_USB_ACCESSORY_ATTACHED -> {
+                    Log.w(TAG, "USB accessory attached (broadcast)")
+                    ServiceState.addEvent("USB attached (broadcast)")
+                    if (!serviceStarted) checkAutoStart()
+                }
+                UsbManager.ACTION_USB_ACCESSORY_DETACHED -> {
+                    Log.w(TAG, "USB accessory detached")
+                    ServiceState.addEvent("USB detached")
+                }
+            }
+        }
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> checkAutoStart() }
@@ -50,11 +67,29 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ServiceState.init(this)
         setContentView(R.layout.activity_main)
         Log.w(TAG, "onCreate action=${intent?.action}")
 
+        val filter = android.content.IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED)
+            addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
+        }
+        registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
+
         setupUI()
         handleUsbIntent(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Re-check USB on resume in case accessory was attached while backgrounded
+        if (!serviceStarted) checkAutoStart()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        unregisterReceiver(usbReceiver)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -112,6 +147,10 @@ class MainActivity : AppCompatActivity() {
                     ServiceState.ConnectionState.STREAMING -> 0xFF4EC9B0.toInt()
                     ServiceState.ConnectionState.ERROR -> 0xFFFF0000.toInt()
                 })
+                if (state == ServiceState.ConnectionState.DISCONNECTED || state == ServiceState.ConnectionState.ERROR) {
+                    serviceStarted = false
+                    btnStartStop.text = "Start Service"
+                }
             }
         }
         lifecycleScope.launch {
@@ -120,6 +159,33 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             ServiceState.events.collectLatest { events ->
                 tvLog.text = events.joinToString("\n")
+            }
+        }
+
+        // Sensor data display
+        val tvSensorData = findViewById<TextView>(R.id.tvSensorData)
+        lifecycleScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(1000)
+                val sb = StringBuilder()
+                val ds = ServiceState.sensorDrivingStatus.value
+                val dsText = if (ds == 0) "UNRESTRICTED" else "RESTRICTED($ds)"
+                sb.appendLine("Mode: ${if (ServiceState.sensorNightMode.value) "NIGHT" else "DAY"}  Drive: $dsText")
+                val loc = ServiceState.sensorLocation.value
+                if (loc.lat != 0.0 || loc.lon != 0.0)
+                    sb.appendLine("GPS: %.5f, %.5f  ±%.0fm".format(loc.lat, loc.lon, loc.accuracy))
+                val spd = ServiceState.sensorSpeed.value
+                if (spd > 0) sb.appendLine("Speed: %.0f km/h".format(spd * 3.6))
+                val rpm = ServiceState.sensorRpm.value
+                if (rpm > 0) sb.appendLine("RPM: %.0f".format(rpm))
+                val gear = ServiceState.sensorGear.value
+                if (gear != 0) sb.appendLine("Gear: ${when(gear) { 100->"D"; 101->"P"; 102->"R"; 0->"N"; else->"$gear" }}")
+                val fuel = ServiceState.sensorFuel.value
+                if (fuel.level >= 0) sb.appendLine("Fuel: ${fuel.level}%  Range: ${fuel.range}km")
+                if (ServiceState.sensorParkingBrake.value) sb.appendLine("⚠ Parking brake ON")
+                val temp = ServiceState.sensorTemperature.value
+                if (temp != 0.0) sb.appendLine("Temp: %.1f°C".format(temp))
+                tvSensorData.text = if (sb.isEmpty()) "Waiting for sensor data..." else sb.toString().trim()
             }
         }
 
@@ -146,10 +212,10 @@ class MainActivity : AppCompatActivity() {
         swFragment.isChecked = ServiceState.fragmentEnabled.value
         swTestPattern.isChecked = ServiceState.testPatternEnabled.value
 
-        swAudio.setOnCheckedChangeListener { _, checked -> ServiceState.audioEnabled.value = checked }
-        swSensor.setOnCheckedChangeListener { _, checked -> ServiceState.sensorEnabled.value = checked }
-        swFragment.setOnCheckedChangeListener { _, checked -> ServiceState.fragmentEnabled.value = checked }
-        swTestPattern.setOnCheckedChangeListener { _, checked -> ServiceState.testPatternEnabled.value = checked }
+        swAudio.setOnCheckedChangeListener { _, checked -> ServiceState.audioEnabled.value = checked; ServiceState.saveSettings() }
+        swSensor.setOnCheckedChangeListener { _, checked -> ServiceState.sensorEnabled.value = checked; ServiceState.saveSettings() }
+        swFragment.setOnCheckedChangeListener { _, checked -> ServiceState.fragmentEnabled.value = checked; ServiceState.saveSettings() }
+        swTestPattern.setOnCheckedChangeListener { _, checked -> ServiceState.testPatternEnabled.value = checked; ServiceState.saveSettings() }
 
         tvFps.text = "FPS: 15"
         tvBitrate.text = "250 Kbps"

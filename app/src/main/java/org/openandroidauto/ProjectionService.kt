@@ -30,6 +30,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         private const val TAG = "AAProjection"
         private const val CHANNEL_ID = "aa_projection"
         private const val NOTIFICATION_ID = 1
+        private const val FRAGMENT_SIZE = 2048
         const val EXTRA_PROJECTION_RESULT_CODE = "projection_result_code"
         const val EXTRA_PROJECTION_DATA = "projection_data"
     }
@@ -340,6 +341,36 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             type == ControlMessageType.AUTH_COMPLETE ||
             type == ControlMessageType.VERSION_REQUEST ||
             type == ControlMessageType.VERSION_RESPONSE
+
+        // Fragment before TLS: split large video payloads into 2KB chunks,
+        // encrypt each separately so head unit gets small TLS records.
+        // Uses AAP FIRST/MIDDLE/LAST frame types so head unit reassembles.
+        val isVideo = type == 0x0000 || type == 0x0001 // AV_MEDIA_WITH_TIMESTAMP or AV_MEDIA
+        if (ServiceState.fragmentEnabled.value && isVideo && shouldEncrypt && !isPlainMessage
+            && payload.size > FRAGMENT_SIZE) {
+            val queue = if (channelId.toInt() == 0) priorityWriteQueue else writeQueue
+            val numChunks = (payload.size + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE
+            for (i in 0 until numChunks) {
+                val offset = i * FRAGMENT_SIZE
+                val end = minOf(offset + FRAGMENT_SIZE, payload.size)
+                val chunk = payload.copyOfRange(offset, end)
+                val encrypted = tls!!.encrypt(chunk)
+                val frameType = when {
+                    i == 0 -> FrameHeader.FrameType.FIRST
+                    i == numChunks - 1 -> FrameHeader.FrameType.LAST
+                    else -> FrameHeader.FrameType.MIDDLE
+                }
+                val header = FrameHeader.create(channelId, frameType, control, encrypted = true)
+                val frame = if (i == 0) {
+                    MessageFramer.buildFirstFrame(header, encrypted, payload.size)
+                } else {
+                    MessageFramer.buildFrame(header, encrypted)
+                }
+                queue.trySend(frame)
+            }
+            return
+        }
+
         val encrypted = if (shouldEncrypt && !isPlainMessage) {
             tls!!.encrypt(payload)
         } else payload
@@ -453,6 +484,18 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         onSendFrame(btChannelId.toUByte(), msg, control = false)
     }
 
+    private fun sendSensorStartRequest(channelId: Int, sensorType: Int) {
+        // SensorStartRequest: field 1 (sensor_type) varint, field 2 (refresh_interval) varint
+        val payload = byteArrayOf(0x08, sensorType.toByte(), 0x10, 0x00) // type, interval=0 (on change)
+        val msg = java.nio.ByteBuffer.allocate(2 + payload.size)
+            .order(java.nio.ByteOrder.BIG_ENDIAN)
+            .putShort(0x8001.toShort()) // SENSOR_START_REQUEST
+            .put(payload)
+            .array()
+        logW("Sending SENSOR_START_REQUEST type=$sensorType on channel $channelId")
+        onSendFrame(channelId.toUByte(), msg, control = false)
+    }
+
     override fun onChannelOpenRequest(channelId: Int, priority: Int) {
         logW("Channel open request: ch=$channelId priority=$priority")
         protocolEngine?.sendChannelOpenResponse(0) // OK
@@ -497,6 +540,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         if (channelId == btChannelId) {
             sendBluetoothPairingRequest()
         }
+        if (channelId == sensorChannelId) {
+            // Subscribe to HU sensor data (HUIG: phone must request sensors)
+            sensorChannel?.requestDefaultSensors()
+        }
     }
 
     /** Send silence (PCM zeros) on the audio channel to keep it active */
@@ -537,8 +584,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTED
         ServiceState.addEvent("Protocol ACTIVE")
         updateNotification("Connected")
-        // Send AUDIO_FOCUS_REQUEST (GAIN) - HUIG: MD MUST request focus before playing
-        protocolEngine?.sendAudioFocusRequest(1) // GAIN=1
+        // HUIG: "User launches AAP → MD sends RELEASE request to HU so the HU has default audio focus"
+        protocolEngine?.sendAudioFocusRequest(4) // RELEASE=4
         // Start sending periodic pings to keep connection alive
         scope.launch {
             while (scope.isActive) {
