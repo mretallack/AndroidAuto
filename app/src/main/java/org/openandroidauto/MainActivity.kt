@@ -69,6 +69,9 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         ServiceState.init(this)
         setContentView(R.layout.activity_main)
+        // Keep screen on to prevent Android from throttling USB I/O when backgrounded
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        requestBatteryOptimizationExemption()
         Log.w(TAG, "onCreate action=${intent?.action}")
 
         val filter = android.content.IntentFilter().apply {
@@ -237,5 +240,16 @@ class MainActivity : AppCompatActivity() {
         serviceStarted = true
         startForegroundService(Intent(this, ProjectionService::class.java))
         findViewById<Button>(R.id.btnStartStop).text = "Stop Service"
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            @Suppress("BatteryLife")
+            val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = android.net.Uri.parse("package:$packageName")
+            }
+            try { startActivity(intent) } catch (_: Exception) {}
+        }
     }
 }

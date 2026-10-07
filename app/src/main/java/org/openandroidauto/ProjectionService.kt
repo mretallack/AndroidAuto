@@ -67,6 +67,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     private var btChannelId: Int = 5
     private var bluetoothAddress: String? = null
     private var audioSilenceJob: kotlinx.coroutines.Job? = null
+    private var audioFocusGrant = kotlinx.coroutines.CompletableDeferred<Int>()
+    private val audioSilenceUnacked = java.util.concurrent.atomic.AtomicInteger(0)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -309,7 +311,13 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             0 -> protocolEngine?.onMessage(type, msgPayload)
             videoChannelId -> videoChannel?.onMessage(type, msgPayload)
             inputChannelId -> inputChannel?.onMessage(type, msgPayload)
-            audioChannelId -> audioOutputChannel?.onMessage(type, msgPayload)
+            audioChannelId -> {
+                audioOutputChannel?.onMessage(type, msgPayload)
+                // Track ACKs for silence stream flow control
+                if (type == AVMessageType.AV_MEDIA_ACK && audioSilenceJob != null) {
+                    audioSilenceUnacked.decrementAndGet()
+                }
+            }
             sensorChannelId -> sensorChannel?.onMessage(type, msgPayload)
             btChannelId -> {
                 // BluetoothPairingResponse or other BT messages from head unit
@@ -524,7 +532,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 .array()
             logW("Sending audio SETUP (PCM) on channel $channelId")
             onSendFrame(channelId.toUByte(), msg, control = false)
-            // Don't start audio silence - it may interfere with video streaming
+            // Audio silence DISABLED - testing showed it makes disconnect WORSE (7-9s vs 9-93s without)
+            // More throughput = faster crash. Re-enable after fixing the root cause.
             // scope.launch { delay(1000); startAudioSilence() }.also { audioSilenceJob = it }
         }
         if (channelId == inputChannelId) {
@@ -551,6 +560,17 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         if (audioChannelId <= 0) return
         logW("Starting audio silence on channel $audioChannelId")
         scope.launch {
+            // HUIG: MD MUST request audio focus and wait for grant before sending audio
+            audioFocusGrant = kotlinx.coroutines.CompletableDeferred()
+            protocolEngine?.sendAudioFocusRequest(1) // GAIN=1
+            logW("Requested AUDIO_FOCUS GAIN, waiting for grant (500ms timeout)")
+            val focusState = kotlinx.coroutines.withTimeoutOrNull(500) { audioFocusGrant.await() }
+            if (focusState == null || focusState == 3) { // null=timeout, 3=LOSS
+                logW("Audio focus not granted (state=$focusState), not sending audio")
+                return@launch
+            }
+            logW("Audio focus granted (state=$focusState), starting PCM silence")
+
             // Send START indication on audio channel
             val startPayload = byteArrayOf(0x08, 0x01, 0x10, 0x00) // session=1, config=0
             val startMsg = java.nio.ByteBuffer.allocate(2 + startPayload.size)
@@ -565,7 +585,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             val silenceChunk = ByteArray(9600) // 50ms of silence at 48kHz stereo 16-bit
             var timestampUs = 0L
             val chunkDurationUs = 50_000L // 50ms in microseconds
+            audioSilenceUnacked.set(0)
             while (scope.isActive) {
+                // Flow control: wait if too many unacked frames (max 5 per SETUP_RESPONSE)
+                while (audioSilenceUnacked.get() >= 5) { delay(10) }
                 val frame = java.nio.ByteBuffer.allocate(2 + 8 + silenceChunk.size)
                     .order(java.nio.ByteOrder.BIG_ENDIAN)
                     .putShort(0x0000.toShort()) // AV_MEDIA_WITH_TIMESTAMP
@@ -573,6 +596,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                     .put(silenceChunk)
                     .array()
                 onSendFrame(audioChannelId.toUByte(), frame, control = false)
+                audioSilenceUnacked.incrementAndGet()
                 timestampUs += chunkDurationUs
                 delay(50)
             }
@@ -602,7 +626,26 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     }
 
     override fun onAudioFocusRequest(focusType: Int) {
-        logW("Audio focus request: type=$focusType")
+        logW("Audio focus notification from HU: type=$focusType")
+        // HUIG: HU sends focus notifications to inform MD of focus state
+        // type: NONE=0, GAIN=1, GAIN_TRANSIENT=2, GAIN_NAVI=3, RELEASE=4
+        // If HU revokes focus (RELEASE/NONE), stop audio immediately
+        if (focusType == 0 || focusType == 4) {
+            audioSilenceJob?.cancel()
+            audioSilenceJob = null
+            logW("HU revoked audio focus, stopped audio silence")
+        }
+    }
+
+    override fun onAudioFocusResponse(focusState: Int) {
+        logW("Audio focus response: state=$focusState")
+        audioFocusGrant.complete(focusState)
+        // HUIG: MD MUST stop playback on focus loss
+        if (focusState == 3 || focusState == 4) { // STATE_LOSS=3, STATE_LOSS_TRANSIENT=4
+            audioSilenceJob?.cancel()
+            audioSilenceJob = null
+            logW("Audio focus lost, stopped audio silence")
+        }
     }
 
     override fun onNavigationFocusRequest(type: Int) {

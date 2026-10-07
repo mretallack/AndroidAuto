@@ -38,6 +38,7 @@ class ConnectionManagerTest {
         override fun onActive() {}
         override fun onShutdown() {}
         override fun onAudioFocusRequest(focusType: Int) {}
+        override fun onAudioFocusResponse(focusState: Int) {}
         override fun onNavigationFocusRequest(type: Int) {}
         override fun onVoiceSessionRequest(type: Int) {}
     }

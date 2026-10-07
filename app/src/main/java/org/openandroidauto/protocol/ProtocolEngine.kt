@@ -50,6 +50,7 @@ interface ProtocolCallback {
     fun onActive()
     fun onShutdown()
     fun onAudioFocusRequest(focusType: Int)
+    fun onAudioFocusResponse(focusState: Int)
     fun onNavigationFocusRequest(type: Int)
     fun onVoiceSessionRequest(type: Int)
 }
@@ -111,7 +112,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             ControlMessageType.SHUTDOWN_RESPONSE -> { state = ProtocolState.DISCONNECTED }
             ControlMessageType.VOICE_SESSION_REQUEST -> handleVoiceSessionRequest(payload)
             ControlMessageType.AUDIO_FOCUS_REQUEST -> handleAudioFocusRequest(payload)
-            ControlMessageType.AUDIO_FOCUS_RESPONSE -> {}
+            ControlMessageType.AUDIO_FOCUS_RESPONSE -> handleAudioFocusResponse(payload)
             else -> Log.w(TAG, "Unknown control message type: 0x${messageType.toString(16)}")
         }
     }
@@ -325,7 +326,9 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
     }
 
     private fun handleAudioFocusRequest(payload: ByteArray) {
-        // AudioFocusRequest: field 1 (audio_focus_type) varint
+        // HU sends this as a focus NOTIFICATION to the MD (telling MD its focus state)
+        // HUIG: "Audio focus requests are always made from the MD to the HU"
+        // So HU→MD is always a notification, not a request needing response
         var focusType = 0
         var i = 0
         while (i < payload.size) {
@@ -340,21 +343,28 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             }
             if (field == 1) focusType = value
         }
-        Log.w(TAG, "AUDIO_FOCUS_REQUEST type=$focusType")
+        Log.w(TAG, "AUDIO_FOCUS_NOTIFICATION from HU: type=$focusType")
         callback.onAudioFocusRequest(focusType)
+        // Do NOT send a response - HU is notifying us, not requesting
+    }
 
-        // Respond: map request type to state
-        // NONE=0, GAIN=1, GAIN_TRANSIENT=2, GAIN_NAVI=3, RELEASE=4
-        // Response states: NONE=0, GAIN=1, GAIN_TRANSIENT=2, LOSS=3
-        val responseState = when (focusType) {
-            0 -> 0 // NONE → NONE
-            1 -> 1 // GAIN → GAIN
-            2 -> 2 // GAIN_TRANSIENT → GAIN_TRANSIENT
-            3 -> 1 // GAIN_NAVI → GAIN
-            4 -> 3 // RELEASE → LOSS
-            else -> 0
+    private fun handleAudioFocusResponse(payload: ByteArray) {
+        var focusState = 0
+        var i = 0
+        while (i < payload.size) {
+            val tag = payload[i].toInt() and 0xFF; i++
+            val field = tag ushr 3
+            var value = 0; var shift = 0
+            while (i < payload.size) {
+                val b = payload[i].toInt() and 0xFF; i++
+                value = value or ((b and 0x7F) shl shift)
+                if (b and 0x80 == 0) break
+                shift += 7
+            }
+            if (field == 1) focusState = value
         }
-        sendAudioFocusResponse(responseState)
+        Log.w(TAG, "AUDIO_FOCUS_RESPONSE state=$focusState")
+        callback.onAudioFocusResponse(focusState)
     }
 
     private fun handleNavigationFocusRequest(payload: ByteArray) {

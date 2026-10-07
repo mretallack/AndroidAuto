@@ -281,6 +281,8 @@ sleep 3 && adb reverse tcp:5000 tcp:5100 && adb shell am start -n org.openandroi
 - [headunit-revived](https://github.com/andreknieriem/headunit-revived) (Kotlin, AGPL-3.0) — head-unit side implementation
 - [f1xpl/aasdk](https://github.com/f1xpl/aasdk) (C++, GPL-3.0) — original protocol library
 - [GAL protocol research](https://milek7.pl/.stuff/galdocs/readme.md) — protocol notes, Wireshark dissector, and cached Head Unit Integration Guide
+- [Head Unit Integration Guide (cached)](https://milek7.pl/.stuff/galdocs/huig13_cache.html) — Google's HUIG v1.3 specification
+- [open-android-auto](https://github.com/mrmees/open-android-auto) — 234 proto files, channel architecture, field notes, decompiled HU firmware analysis
 
 ### Protobuf Definition Evolution
 

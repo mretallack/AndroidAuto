@@ -25,13 +25,16 @@ class AudioOutputChannel(
     private var audioRecord: AudioRecord? = null
     private var running = false
     private var session = 0
+    private var unackedFrames = 0
+    private var maxUnacked = 5
+    private val ackLock = Object()
 
     fun onMessage(messageType: Int, payload: ByteArray) {
         when (messageType) {
             AVMessageType.SETUP_REQUEST -> handleSetupRequest()
             AVMessageType.START_INDICATION -> handleStartIndication(payload)
             AVMessageType.STOP_INDICATION -> stop()
-            AVMessageType.AV_MEDIA_ACK -> {} // flow control
+            AVMessageType.AV_MEDIA_ACK -> handleAck()
         }
     }
 
@@ -82,10 +85,17 @@ class AudioOutputChannel(
             val frameDurationUs = (buffer.size.toLong() * 1_000_000) / (SAMPLE_RATE * CHANNEL_COUNT * 2)
 
             while (running) {
+                // Flow control: wait if too many unacked frames
+                synchronized(ackLock) {
+                    while (unackedFrames >= maxUnacked && running) {
+                        ackLock.wait(100)
+                    }
+                }
                 val record = audioRecord ?: break
                 val read = record.read(buffer, 0, buffer.size)
                 if (read > 0) {
                     sendAudioFrame(buffer.copyOf(read), timestampUs)
+                    synchronized(ackLock) { unackedFrames++ }
                     timestampUs += frameDurationUs
                 }
             }
@@ -93,6 +103,13 @@ class AudioOutputChannel(
             name = "AA-AudioCapture"
             isDaemon = true
             start()
+        }
+    }
+
+    private fun handleAck() {
+        synchronized(ackLock) {
+            if (unackedFrames > 0) unackedFrames--
+            ackLock.notifyAll()
         }
     }
 

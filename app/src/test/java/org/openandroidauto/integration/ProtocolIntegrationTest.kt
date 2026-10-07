@@ -61,6 +61,7 @@ class ProtocolIntegrationTest {
         override fun onActive() { activeCount++ }
         override fun onShutdown() { shutdownCount++ }
         override fun onAudioFocusRequest(focusType: Int) { audioFocusType = focusType }
+        override fun onAudioFocusResponse(focusState: Int) {}
         override fun onNavigationFocusRequest(type: Int) { navFocusType = type }
         override fun onVoiceSessionRequest(type: Int) { voiceSessionType = type }
 
@@ -181,26 +182,24 @@ class ProtocolIntegrationTest {
         // AudioFocusRequest: field 1 (audio_focus_type) = GAIN(1)
         engine.onMessage(ControlMessageType.AUDIO_FOCUS_REQUEST, byteArrayOf(0x08, 0x01))
 
+        // HUIG: HU→MD is a notification, MD should NOT send a response
         assertEquals(1, cb.audioFocusType)
         val resp = cb.findSent(0, ControlMessageType.AUDIO_FOCUS_RESPONSE)
-        assertNotNull("Should send AUDIO_FOCUS_RESPONSE", resp)
+        assertNull("Should NOT send response to HU notification", resp)
     }
 
     @Test
-    fun `AUDIO_FOCUS_REQUEST RELEASE triggers response with LOSS state`() {
+    fun `AUDIO_FOCUS_REQUEST RELEASE triggers notification callback without response`() {
         advanceToActive()
         cb.sentFrames.clear()
 
         // AudioFocusRequest: field 1 = RELEASE(4)
         engine.onMessage(ControlMessageType.AUDIO_FOCUS_REQUEST, byteArrayOf(0x08, 0x04))
 
+        // HUIG: HU→MD is a notification, not a request needing response
         assertEquals(4, cb.audioFocusType)
         val resp = cb.findSent(0, ControlMessageType.AUDIO_FOCUS_RESPONSE)
-        assertNotNull(resp)
-        // Response should contain LOSS(3)
-        val payload = resp!!.second.copyOfRange(2, resp.second.size)
-        assertEquals(0x08.toByte(), payload[0])
-        assertEquals(0x03.toByte(), payload[1]) // LOSS = 3
+        assertNull("Should NOT send response to HU notification", resp)
     }
 
     // --- Navigation Focus ---

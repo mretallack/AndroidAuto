@@ -36,6 +36,7 @@ class ProtocolEngineTest {
         override fun onActive() { activeCount++ }
         override fun onShutdown() { shutdownCount++ }
         override fun onAudioFocusRequest(focusType: Int) {}
+        override fun onAudioFocusResponse(focusState: Int) {}
         override fun onNavigationFocusRequest(type: Int) {}
         override fun onVoiceSessionRequest(type: Int) {}
     }

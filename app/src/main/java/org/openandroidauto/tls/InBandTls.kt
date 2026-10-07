@@ -23,6 +23,7 @@ class InBandTls(private val engine: SSLEngine) {
     private val appBuffer: ByteBuffer = ByteBuffer.allocate(engine.session.applicationBufferSize)
 
     private var handshakeStarted = false
+    private val tlsLock = Object()
 
     /**
      * Start the TLS handshake. Returns initial TLS records to send as SSL_HANDSHAKE messages.
@@ -49,16 +50,18 @@ class InBandTls(private val engine: SSLEngine) {
     fun encrypt(plaintext: ByteArray): ByteArray {
         if (!isHandshakeComplete) return plaintext
 
-        netOutBuffer.clear()
-        val result = engine.wrap(ByteBuffer.wrap(plaintext), netOutBuffer)
-        if (result.status != SSLEngineResult.Status.OK) {
-            Log.w(TAG, "Encrypt failed: ${result.status}")
-            return plaintext
+        synchronized(tlsLock) {
+            netOutBuffer.clear()
+            val result = engine.wrap(ByteBuffer.wrap(plaintext), netOutBuffer)
+            if (result.status != SSLEngineResult.Status.OK) {
+                Log.w(TAG, "Encrypt failed: ${result.status}")
+                return plaintext
+            }
+            netOutBuffer.flip()
+            val encrypted = ByteArray(netOutBuffer.remaining())
+            netOutBuffer.get(encrypted)
+            return encrypted
         }
-        netOutBuffer.flip()
-        val encrypted = ByteArray(netOutBuffer.remaining())
-        netOutBuffer.get(encrypted)
-        return encrypted
     }
 
     /**
@@ -67,16 +70,18 @@ class InBandTls(private val engine: SSLEngine) {
     fun decrypt(ciphertext: ByteArray): ByteArray {
         if (!isHandshakeComplete) return ciphertext
 
-        appBuffer.clear()
-        val result = engine.unwrap(ByteBuffer.wrap(ciphertext), appBuffer)
-        if (result.status != SSLEngineResult.Status.OK) {
-            Log.w(TAG, "Decrypt failed: ${result.status}")
-            return ciphertext
+        synchronized(tlsLock) {
+            appBuffer.clear()
+            val result = engine.unwrap(ByteBuffer.wrap(ciphertext), appBuffer)
+            if (result.status != SSLEngineResult.Status.OK) {
+                Log.w(TAG, "Decrypt failed: ${result.status}")
+                return ciphertext
+            }
+            appBuffer.flip()
+            val decrypted = ByteArray(appBuffer.remaining())
+            appBuffer.get(decrypted)
+            return decrypted
         }
-        appBuffer.flip()
-        val decrypted = ByteArray(appBuffer.remaining())
-        appBuffer.get(decrypted)
-        return decrypted
     }
 
     private fun processHandshake(): List<ByteArray> {
@@ -142,6 +147,6 @@ class InBandTls(private val engine: SSLEngine) {
 
     private fun onHandshakeFinished() {
         isHandshakeComplete = true
-        Log.i(TAG, "TLS handshake finished")
+        Log.i(TAG, "TLS handshake finished: cipher=${engine.session.cipherSuite} protocol=${engine.session.protocol}")
     }
 }
