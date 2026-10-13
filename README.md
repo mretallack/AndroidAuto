@@ -347,7 +347,7 @@ The private key is AES-256-CBC encrypted inside the Android Auto APK. The head u
 The key is embedded (encrypted) in the Android Auto APK and can be decrypted using the APK's own algorithm. This requires any Android device with ADB access (no root, no Google Play Services needed) to run the decryption, because Android's Base64 decoder behaves differently from the desktop JVM.
 
 **Requirements:**
-- The Android Auto APK (pull from a phone with `adb pull`, or download from APKPure/APKMirror)
+- The Android Auto APK — either pulled from a phone with `adb pull`, or downloaded from APKPure/APKMirror. (The APKPure XAPK for v17.7.663654 was verified to contain byte-identical salt/ciphertext/cert payloads to the device-pulled APK and extracts the same working key — see the APKPure note below.)
 - Any Android device with ADB access to run the decryption (no root, no Google Play Services needed)
 - Android SDK (`d8` build tool, `adb`)
 
