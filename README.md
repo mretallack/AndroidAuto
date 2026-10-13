@@ -344,12 +344,61 @@ The private key is AES-256-CBC encrypted inside the Android Auto APK. The head u
 
 #### Path A: Decrypt from the APK
 
-The key is embedded (encrypted) in the Android Auto APK and can be decrypted using the APK's own algorithm. This requires any Android device with ADB access (no root, no Google Play Services needed) to run the decryption, because Android's Base64 decoder behaves differently from the desktop JVM.
+The key is embedded (encrypted) in the Android Auto APK and can be decrypted using the APK's own algorithm. The APK's decryption uses `android.util.Base64`, whose decoder silently *skips* non-base64 bytes — behaviour that standard desktop Base64 decoders don't replicate. There are two ways to handle this:
+
+- **Method 1 (recommended): desktop-only, no Android device.** Use [`tools/ExtractKey.java`](tools/ExtractKey.java), which ports the exact AOSP Base64 SKIP-filtering decoder so the whole extraction runs on a plain desktop JVM.
+- **Method 2: on-device.** Run the decryption on any Android device with `dalvikvm` (no root, no Google Play Services). This was the original method; Method 1 supersedes it.
 
 **Requirements:**
 - The Android Auto APK — either pulled from a phone with `adb pull`, or downloaded from APKPure/APKMirror. (The APKPure XAPK for v17.7.663654 was verified to contain byte-identical salt/ciphertext/cert payloads to the device-pulled APK and extracts the same working key — see the APKPure note below.)
-- Any Android device with ADB access to run the decryption (no root, no Google Play Services needed)
-- Android SDK (`d8` build tool, `adb`)
+- A JDK (`javac`/`java`) — for Method 1, this is all you need.
+- JADX (to decompile and locate the byte arrays). `adb` + Android SDK `d8`/`dalvikvm` are only needed for Method 2.
+
+---
+
+##### Method 1: Desktop-only extraction with `tools/ExtractKey.java`
+
+No Android device is required at any point. `ExtractKey.java` reimplements the APK's KDF + AES-CBC decryption **and** ports AOSP's `Base64` decoder (which silently skips non-base64 bytes — the `-1`/`SKIP` entries in the decode table), so it produces a byte-identical result to on-device extraction.
+
+**Steps:**
+
+1. **Obtain the base APK.** If you have an XAPK (e.g. from APKPure), unzip the base APK out of it:
+   ```bash
+   unzip Android+Auto_*.xapk com.google.android.projection.gearhead.apk
+   ```
+   Or pull from a phone: `adb pull $(adb shell pm path com.google.android.projection.gearhead | grep base | cut -d: -f2) aa.apk`
+
+2. **Decompile with JADX** and locate the cert provider class (see "Finding the cert provider class" below):
+   ```bash
+   jadx -d jadx_out --no-res com.google.android.projection.gearhead.apk
+   ```
+
+3. **Extract three inputs to files:**
+   - `salt.bin` — the 256-byte KDF salt array (v17.7: `sbd.b`)
+   - `enckey.bin` — the ~1712-byte encrypted key array (v17.7: `sbd.c`)
+   - `cert.pem` — the CarService cert PEM returned by `a()` (v17.7: `sba.a()`)
+
+   The arrays appear as `static final byte[]` literals in the decompiled source; write them out as raw bytes. (The Google Automotive Link CA cert is built into `ExtractKey.java`, so you don't need to supply it — but you can pass it as a 4th argument if a future version changes it.)
+
+4. **Compile and run — pure desktop JVM, no device:**
+   ```bash
+   javac tools/ExtractKey.java
+   java ExtractKey salt.bin enckey.bin cert.pem > app/src/main/assets/carservice_key.pem
+   ```
+   `ExtractKey` prints the PKCS#8 PEM key to stdout and a success summary (key size, modulus) to stderr. It validates that the result parses as an RSA key before emitting it.
+
+5. **Verify the key matches the cert:**
+   ```bash
+   openssl rsa  -in app/src/main/assets/carservice_key.pem  -noout -modulus | md5sum
+   openssl x509 -in app/src/main/assets/carservice_cert.pem -noout -modulus | md5sum
+   # the two md5 sums must be identical
+   ```
+
+> **Verified:** `ExtractKey.java` was run against the APKPure XAPK data on a plain Linux desktop JVM (no Android device, no `dalvikvm`) and produced a byte-identical key to the on-device extraction — modulus matches `carservice_cert.pem`, 2048-bit RSA, valid until Dec 31 2026.
+
+---
+
+##### Method 2: On-device decryption (legacy)
 
 **Process:**
 
@@ -415,9 +464,7 @@ IvParameterSpec iv = new IvParameterSpec(buf, 32, 16);     // bytes 32..48 = IV
 ```
 Both the AES key **and** the IV are derived from the same 48-byte KDF buffer. The KDF is seeded by *both* the CarService cert and the GAL CA cert (in that order), then self-mixed 7 times.
 
-**Note:** Must run on Android (not desktop JVM) due to `android.util.Base64` vs `java.util.Base64` differences. The desktop JVM's `Base64.getUrlDecoder()` rejects standard base64 characters (`+`, `/`) and newlines that Android's decoder accepts. Use `Base64.getMimeDecoder()` on desktop, or run the decryption on-device with `dalvikvm`:
-
-**Desktop-only extraction (no Android device needed):** [`tools/ExtractKey.java`](tools/ExtractKey.java) ports the exact AOSP `Base64` SKIP-filtering decoder to run entirely on a desktop JVM. It accepts the salt, encrypted key, and cert PEM as files and outputs the PKCS#8 PEM key. The AOSP decoder silently skips non-base64 bytes (the `-1`/SKIP entries in the decode table), which is why standard desktop Base64 decoders fail but this tool succeeds. Usage: `javac tools/ExtractKey.java && java ExtractKey salt.bin enckey.bin cert.pem > key.pem`
+**Note:** The desktop JVM's standard `Base64.getUrlDecoder()` rejects the `+`/`/` characters and embedded non-base64 bytes that Android's `android.util.Base64.decode(data, flag)` silently skips — this is why a naive desktop port fails with `IllegalArgumentException`/`BadPaddingException`. Method 1's [`tools/ExtractKey.java`](tools/ExtractKey.java) solves this by porting AOSP's exact SKIP-filtering decode table, so it works on a plain desktop JVM. If you instead reimplement by hand on desktop, use `Base64.getMimeDecoder()` (which also skips non-base64 bytes); on-device (Method 2), `android.util.Base64` already does the right thing.
 
 **Important:** When writing the `Decrypt.java`, read the cert PEMs and byte arrays from raw binary **files** (not embedded Java string literals). Embedding the PEM as a Java `String` constant can introduce subtle byte differences from unicode-escape round-tripping, which corrupts the KDF output and causes `BadPaddingException`. The file-based approach in [`tools/decrypt_key_from_apk.md`](tools/decrypt_key_from_apk.md) avoids this.
 
