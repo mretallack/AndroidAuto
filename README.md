@@ -382,6 +382,8 @@ The decryption function is in a nearby class — search for `"AES/CBC/PKCS5Paddi
 
 **Note:** You don't modify or run the decompiled APK code. Instead, you write a standalone `Decrypt.java` class that reimplements the decryption logic, reads the extracted byte arrays from files, and has its own `main()` entry point. The decompiled source is only used as a reference to understand the algorithm and copy out the byte arrays. See [`tools/decrypt_key_from_apk.md`](tools/decrypt_key_from_apk.md) for the complete `Decrypt.java` source.
 
+> **No Google Play Services or Android Auto required at all:** If you obtain the APK from APKPure/APKMirror (see the APKPure note below), you don't need GApps for *any* step. The entire extraction — decompiling on a PC, then running the decryption DEX on-device — was verified on a moto g52 running Android 16 with **no Play Services and no Android Auto installed**. The only requirement is `dalvikvm`, which is present on every Android device.
+
 **Critical JADX bug:** JADX decompiles the KDF helper as `byte b = bArr2[i2] & 255;` but it must be `int b = bArr2[i2] & 255;`. The `byte` type truncates back to signed, producing garbage output. Fix this to `int` and the decryption works.
 
 The KDF (`tweakBytes`/`ap`) function:
@@ -414,6 +416,8 @@ IvParameterSpec iv = new IvParameterSpec(buf, 32, 16);     // bytes 32..48 = IV
 Both the AES key **and** the IV are derived from the same 48-byte KDF buffer. The KDF is seeded by *both* the CarService cert and the GAL CA cert (in that order), then self-mixed 7 times.
 
 **Note:** Must run on Android (not desktop JVM) due to `android.util.Base64` vs `java.util.Base64` differences. The desktop JVM's `Base64.getUrlDecoder()` rejects standard base64 characters (`+`, `/`) and newlines that Android's decoder accepts. Use `Base64.getMimeDecoder()` on desktop, or run the decryption on-device with `dalvikvm`:
+
+**Desktop-only extraction (no Android device needed):** [`tools/ExtractKey.java`](tools/ExtractKey.java) ports the exact AOSP `Base64` SKIP-filtering decoder to run entirely on a desktop JVM. It accepts the salt, encrypted key, and cert PEM as files and outputs the PKCS#8 PEM key. The AOSP decoder silently skips non-base64 bytes (the `-1`/SKIP entries in the decode table), which is why standard desktop Base64 decoders fail but this tool succeeds. Usage: `javac tools/ExtractKey.java && java ExtractKey salt.bin enckey.bin cert.pem > key.pem`
 
 **Important:** When writing the `Decrypt.java`, read the cert PEMs and byte arrays from raw binary **files** (not embedded Java string literals). Embedding the PEM as a Java `String` constant can introduce subtle byte differences from unicode-escape round-tripping, which corrupts the KDF output and causes `BadPaddingException`. The file-based approach in [`tools/decrypt_key_from_apk.md`](tools/decrypt_key_from_apk.md) avoids this.
 
