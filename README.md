@@ -370,8 +370,13 @@ Known class names by version:
 |---|---|---|---|
 | v6.4 | `SslWrapper` (fields `o`, `p`) | same class | `SslWrapper.m23915f()` |
 | v16.8 | `ivo` / `rqi` | `ivq` / `rql` (fields `b`, `c`) | `ivq.d()` |
+| v17.7.663654 | `sba` (interface `sbe`) | `sbd` (fields `b`=salt, `c`=enc key) | `rze.<init>` / KDF `uga.bl` / key parse `uga.I` |
 
-The decryption function is in a nearby class — search for `"AES/CBC/PKCS5Padding"` to find it. It takes the cert provider interface as a parameter.
+In v17.7 the cert provider interface `sbe` has three methods: `a()` → CarService cert PEM, `b()` → encrypted key (`sbd.c`, 1712 bytes), `c()` → KDF salt (`sbd.b`, 256 bytes). There is a duplicate copy of the same arrays and logic in classes `jen`/`jep` (interface `jeq`) — either copy works since the arrays are byte-identical.
+
+The decryption function is in a nearby class — search for `"AES/CBC/PKCS5Padding"` to find it. It takes the cert provider interface as a parameter. In v17.7 the working, fully-decompiled path is the `rze` constructor (the parallel `jep.d()` shows as "method not decompiled" in JADX but is identical).
+
+> **Note on the Phenotype fallback (v17.x):** In v17.7 the primary cert/key source is Google's Phenotype server config (flags `SenderlibCertFeature__p_table`, `__backup_key_raw`, `__backup_table`, etc. in class `adib`), which is empty in the APK and only populated at runtime via Google Play Services. The hardcoded `sbd` arrays are the **fallback** used when those flags are empty — and this fallback IS a self-consistent, working cert+key set. You do **not** need Phenotype access; the hardcoded arrays decrypt to the key that matches the hardcoded `sba.a()` cert (verified: moduli match, valid until Dec 31 2026).
 
 **Note:** The decryption step (step 4) only needs `dalvikvm` — any Android device with ADB works, no root or Google Play Services required. The GApps requirement is only for step 1 (pulling the APK, since the AA app is distributed via Play Store).
 
@@ -391,12 +396,28 @@ static void tweakBytes(byte[] bArr, byte[] bArr2, byte[] bArr3) {
 }
 ```
 
-After AES decryption, the `T()` function extracts the key:
+After AES decryption, the `T()` function (in v17.7, `uga.I`) extracts the key:
 - Skip first 28 bytes, trim last 26 bytes
 - Base64 decode (URL_SAFE, flag=2) the middle portion
 - Result is PKCS#8 DER encoded RSA private key
 
+**Full derivation sequence (verified against v17.7 `rze` constructor bytecode):**
+```java
+byte[] buf = new byte[48];
+tweakBytes(carServiceCertPem.getBytes(UTF_8), buf, salt);  // seed 1: CarService cert
+tweakBytes(galCaCertPem.getBytes(UTF_8),      buf, salt);  // seed 2: Google Automotive Link CA cert
+for (int i = 0; i < 7; i++) tweakBytes(buf, buf, salt);     // 7 self-mixing rounds
+byte[] aesKey = Arrays.copyOfRange(buf, 0, 32);            // bytes 0..32  = AES-256 key
+IvParameterSpec iv = new IvParameterSpec(buf, 32, 16);     // bytes 32..48 = IV
+// AES/CBC/PKCS5Padding DECRYPT the ~1712-byte encrypted key, then uga.I() to get PKCS#8 DER
+```
+Both the AES key **and** the IV are derived from the same 48-byte KDF buffer. The KDF is seeded by *both* the CarService cert and the GAL CA cert (in that order), then self-mixed 7 times.
+
 **Note:** Must run on Android (not desktop JVM) due to `android.util.Base64` vs `java.util.Base64` differences. The desktop JVM's `Base64.getUrlDecoder()` rejects standard base64 characters (`+`, `/`) and newlines that Android's decoder accepts. Use `Base64.getMimeDecoder()` on desktop, or run the decryption on-device with `dalvikvm`:
+
+**Important:** When writing the `Decrypt.java`, read the cert PEMs and byte arrays from raw binary **files** (not embedded Java string literals). Embedding the PEM as a Java `String` constant can introduce subtle byte differences from unicode-escape round-tripping, which corrupts the KDF output and causes `BadPaddingException`. The file-based approach in [`tools/decrypt_key_from_apk.md`](tools/decrypt_key_from_apk.md) avoids this.
+
+> **APKPure / download site APKs work fine:** Despite earlier concerns, the APKPure xapk for v17.7.663654 contains byte-identical cert, salt, and encrypted-key arrays to the device-pulled APK. The key extracts successfully from either source. To use the xapk: `unzip *.xapk com.google.android.projection.gearhead.apk` to get the base APK, then follow the normal extraction steps.
 
 ```bash
 # Compile to DEX and run on any Android device with ADB access
