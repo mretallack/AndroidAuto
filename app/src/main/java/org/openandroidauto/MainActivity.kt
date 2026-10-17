@@ -226,6 +226,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun startServiceWithProjection(resultCode: Int, data: Intent) {
         if (serviceStarted) return
+        if (isProjectionServiceRunning()) {
+            Log.w(TAG, "ProjectionService already running — not starting a second instance")
+            serviceStarted = true
+            return
+        }
         serviceStarted = true
         val serviceIntent = Intent(this, ProjectionService::class.java).apply {
             putExtra(ProjectionService.EXTRA_PROJECTION_RESULT_CODE, resultCode)
@@ -237,9 +242,24 @@ class MainActivity : AppCompatActivity() {
 
     private fun startService() {
         if (serviceStarted) return
+        // Guard against a race with the service's own in-place reconnect loop:
+        // never launch a second instance while one is already running.
+        if (isProjectionServiceRunning()) {
+            Log.w(TAG, "ProjectionService already running — not starting a second instance")
+            serviceStarted = true
+            return
+        }
         serviceStarted = true
         startForegroundService(Intent(this, ProjectionService::class.java))
         findViewById<Button>(R.id.btnStartStop).text = "Stop Service"
+    }
+
+    private fun isProjectionServiceRunning(): Boolean {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        @Suppress("DEPRECATION")
+        return am.getRunningServices(Int.MAX_VALUE).any {
+            it.service.className == ProjectionService::class.java.name
+        }
     }
 
     private fun requestBatteryOptimizationExemption() {

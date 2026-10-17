@@ -36,6 +36,9 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // Per-attempt job: owns this session's read/write/ping loops so teardown can
+    // cancel them before a retry (prevents a stale loop writing to a dead fd).
+    private var sessionJob: Job? = null
     private val writeQueue = CoChannel<ByteArray>(capacity = 64)
     private val priorityWriteQueue = CoChannel<ByteArray>(capacity = 16)
     private var transport: Transport? = null
@@ -165,7 +168,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         } else {
             logW("No MediaProjection - will send black frames")
         }
-        scope.launch { sessionWithReconnect() }
+        scope.launch { sessionWithReconnect(this) }
         return START_NOT_STICKY
     }
 
@@ -177,28 +180,46 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
      * On each EIO the head-unit drops VBUS, so the accessory disappears; once it
      * is plugged back in, the retry loop re-establishes the session in-place.
      */
-    private suspend fun sessionWithReconnect() {
+    private suspend fun sessionWithReconnect(runScope: CoroutineScope) {
         var attempt = 0
-        while (scope.isActive) {
+        while (runScope.isActive) {
             attempt++
             logW("Session attempt #$attempt")
+            // Watchdog: if this attempt never reaches ACTIVE (dead accessory still
+            // listed in usbManager), cancel it so we don't sit pinging into a void.
+            val watchdog = scope.launch {
+                delay(8000)
+                if (ServiceState.connectionState.value != ServiceState.ConnectionState.CONNECTED &&
+                    ServiceState.connectionState.value != ServiceState.ConnectionState.STREAMING) {
+                    logW("Attempt #$attempt: no handshake within 8s — aborting attempt")
+                    sessionJob?.cancel()
+                }
+            }
             startSession()
-            if (!scope.isActive) break
+            watchdog.cancel()
+            if (!runScope.isActive) break
 
             // startSession returned => the session ended (EOF/EIO/exception).
-            signalDisconnected("session ended")
+            // Tear the previous attempt's loops down *before* anything else so a
+            // stale ping/write loop can never keep running into the retry.
+            teardownSession()
             val usbPresent = isUsbAccessoryAttached()
             logW("Session attempt #$attempt ended. USB accessory attached=$usbPresent")
             if (!usbPresent) {
                 logW("No USB accessory attached — stopping service (plug in to reconnect)")
                 break
             }
-            // Accessory still present: back off briefly and retry in-place.
-            val delayMs = 1000L
+            // The accessory may still be listed briefly after the HU cut VBUS.
+            // Wait for it to reappear/warm up before retrying.
+            val delayMs = 2000L
             logW("Retrying in ${delayMs}ms...")
+            if (!runScope.isActive) break
             delay(delayMs)
             resetForReconnect()
         }
+        // Only publish a terminal state once we have genuinely given up, so
+        // MainActivity does not spawn a second service while we retry in-place.
+        signalDisconnected("reconnect loop ended")
         stopSelf()
     }
 
@@ -210,10 +231,19 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         false
     }
 
-    /** Tear down per-session state so a fresh attempt starts clean. */
-    private suspend fun resetForReconnect() {
+    /**
+     * Tear down the loops and transport for the current attempt. Cancels the
+     * per-session child jobs so no stale loop survives into the next attempt.
+     */
+    private suspend fun teardownSession() {
+        sessionJob?.cancelAndJoin()
+        sessionJob = null
         try { transport?.disconnect() } catch (_: Exception) {}
         transport = null
+    }
+
+    /** Tear down per-session state so a fresh attempt starts clean. */
+    private suspend fun resetForReconnect() {
         protocolEngine = null
         inBandTls = null
         videoChannel?.stop()
@@ -228,6 +258,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         while (writeQueue.tryReceive().isSuccess) { /* drain */ }
         enqueued = 0; written = 0
         framesSent = 0; framesReceived = 0
+        lastInboundMs = 0
         // Stay in CONNECTING (not ERROR) so MainActivity keeps serviceStarted=true
         // and doesn't try to start a second service while we're retrying in-place.
         ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTING
@@ -256,6 +287,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     }
 
     private suspend fun startSession() {
+        // Fresh child scope per attempt — cancelled in teardownSession() so no
+        // loop from this attempt survives into the retry.
+        val sessionScope = CoroutineScope(Dispatchers.IO + SupervisorJob(scope.coroutineContext[Job]))
+        sessionJob = sessionScope.coroutineContext[Job]
         try {
             val activeTransport: Transport = try {
                 logW("Looking for USB accessory...")
@@ -312,7 +347,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
             // Send VERSION_REQUEST after a brief delay to allow head unit to send first
             // (openauto sends VERSION_REQUEST; real car head units wait for phone to send it)
-            scope.launch {
+            sessionScope.launch {
                 delay(500)
                 if (protocolEngine?.state == ProtocolState.VERSION_NEGOTIATION) {
                     logW("No VERSION_REQUEST from head unit, sending ours")
@@ -320,8 +355,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 }
             }
 
-            scope.launch { writeLoop() }
-            readLoop(activeTransport)
+            sessionScope.launch { writeLoop() }
+            readLoop(activeTransport, sessionScope)
         } catch (e: Exception) {
             Log.e(TAG, "Session failed: ${e.message}", e)
             updateNotification("Error: ${e.message}")
@@ -330,12 +365,12 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         }
     }
 
-    private suspend fun readLoop(transport: Transport) {
+    private suspend fun readLoop(transport: Transport, sessionScope: CoroutineScope) {
         val buffer = ByteBuffer.allocate(32768)
         val decoder = MessageFramer.Decoder()
         logW("Read loop started")
 
-        while (scope.isActive) {
+        while (sessionScope.isActive) {
             val read = transport.read(buffer)
             if (read <= 0) {
                 logW("Transport read returned $read, disconnecting")
@@ -766,9 +801,11 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         // HUIG: "User launches AAP → MD sends RELEASE request to HU so the HU has default audio focus"
         protocolEngine?.sendAudioFocusRequest(4) // RELEASE=4
         lastInboundMs = System.currentTimeMillis() // avoid a false stall at start
+        // Run the keepalive/health loops under sessionJob so teardown cancels them.
+        val loopScope = sessionJob?.let { CoroutineScope(Dispatchers.IO + it) } ?: scope
         // Start sending periodic pings to keep connection alive
-        scope.launch {
-            while (scope.isActive) {
+        loopScope.launch {
+            while (loopScope.isActive) {
                 delay(1000)
                 val tsUs = System.currentTimeMillis() * 1000
                 protocolEngine?.sendPingRequest(tsUs)
@@ -784,8 +821,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             }
         }
         // Periodic health log every 5s: trends the smooth degrade into the stall.
-        scope.launch {
-            while (scope.isActive) {
+        loopScope.launch {
+            while (loopScope.isActive) {
                 delay(5000)
                 val acks = acksByType.entries.joinToString(",") { "0x${it.key.toString(16)}=${it.value}" }
                 val inb = inboundByType.entries.joinToString(",") { "0x${it.key.toString(16)}=${it.value}" }
