@@ -53,6 +53,7 @@ interface ProtocolCallback {
     fun onAudioFocusResponse(focusState: Int)
     fun onNavigationFocusRequest(type: Int)
     fun onVoiceSessionRequest(type: Int)
+    fun onPingResponse(echoedTimestampUs: Long)
 }
 
 class ProtocolEngine(private val callback: ProtocolCallback) {
@@ -105,7 +106,18 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             ControlMessageType.CHANNEL_OPEN_REQUEST -> handleChannelOpenRequest(payload)
             ControlMessageType.CHANNEL_OPEN_RESPONSE -> handleChannelOpenResponse(payload)
             ControlMessageType.PING_REQUEST -> handlePingRequest(payload)
-            ControlMessageType.PING_RESPONSE -> {}
+            ControlMessageType.PING_RESPONSE -> {
+                // Log the echoed timestamp: the HU should return our own value.
+                var echoed = 0L; var shift = 0; var i = 0
+                while (i < payload.size) {
+                    val b = payload[i].toInt() and 0xFF; i++
+                    echoed = echoed or ((b and 0x7F).toLong() shl shift)
+                    if (b and 0x80 == 0) break
+                    shift += 7
+                }
+                Log.w(TAG, "PING_RESPONSE echoed=$echoed")
+                callback.onPingResponse(echoed)
+            }
             ControlMessageType.NAVIGATION_FOCUS_REQUEST -> handleNavigationFocusRequest(payload)
             ControlMessageType.NAVIGATION_FOCUS_RESPONSE -> {}
             ControlMessageType.SHUTDOWN_REQUEST -> handleShutdownRequest(payload)

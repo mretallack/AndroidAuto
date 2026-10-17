@@ -26,8 +26,13 @@ class TcpServerTransport(private val port: Int = 5277) : Transport {
 
     override suspend fun connect(): Unit = withContext(Dispatchers.IO) {
         Log.w("AATcpServer", "Listening on port $port for DHU connection...")
-        val server = ServerSocket(port)
+        // Close any socket left over from a previous attempt so we don't leak the
+        // port (previously caused EADDRINUSE on service restart / reconnect).
+        try { serverSocket?.close() } catch (_: Exception) {}
+        serverSocket = null
+        val server = ServerSocket()
         server.reuseAddress = true
+        server.bind(java.net.InetSocketAddress(port))
         serverSocket = server
         val client = server.accept()
         client.soTimeout = 10000 // 10 second read timeout

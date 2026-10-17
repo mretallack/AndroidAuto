@@ -47,9 +47,77 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     private var framesReceived = 0L
     private val touchInjector = TouchInjector()
 
+    // ─── Disconnect-stall instrumentation (see docs/connection-stability.md) ───
+    // Records how long the head unit has been silent, write-queue backlog, and
+    // ping cadence, so we can characterise the "HU goes deaf, then EIO" pattern.
+    @Volatile private var lastInboundMs = 0L
+    @Volatile private var lastInboundChannel = -1
+    @Volatile private var lastInboundType = 0
+    @Volatile private var framesSentAtLastInbound = 0L
+    @Volatile private var stallReported = false
+    @Volatile private var pingSentCount = 0L
+    @Volatile private var pongCount = 0L
+    private val acksByType = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    private val inboundByType = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+
+    /** Mark that a fresh frame arrived from the head unit, and clear any stall state. */
+    private fun markInbound(channelId: Int, type: Int) {
+        lastInboundMs = System.currentTimeMillis()
+        lastInboundChannel = channelId
+        lastInboundType = type
+        framesSentAtLastInbound = framesSent
+        stallReported = false
+        inboundByType.merge(type, 1, Int::plus)
+    }
+
+    private fun markAck(type: Int) {
+        acksByType.merge(type, 1, Int::plus)
+    }
+
+    private fun inboundSilenceMs(): Long {
+        val t = lastInboundMs
+        return if (t == 0L) 0L else System.currentTimeMillis() - t
+    }
+
+    // Approximate backlog: we track enqueues vs. writes ourselves rather than
+    // peeking the channel (peeking via tryReceive would consume a frame).
+    @Volatile private var enqueued = 0L
+    @Volatile private var written = 0L
+
+    private fun queueBacklog(): String = "enq=${enqueued - written} (q=${enqueued} w=${written})"
+
+    /** Log a one-shot stall report: HU silent while we keep writing. */
+    private fun reportStallIfSilent() {
+        val silence = inboundSilenceMs()
+        // Threshold must exceed the normal inter-message gap. Idle accessory-mode
+        // cadence is ~790ms between ch=6 sensor batches, so 500ms produced false
+        // positives (219 in the 2026-10-17 run). Use 2000ms — well above the
+        // ~790ms idle cadence but still well before the ~1.4s pre-EIO silence.
+        if (silence >= 2000 && !stallReported && framesSent > 10) {
+            stallReported = true
+            logW("STALL: HU silent for ${silence}ms (last inbound ch=$lastInboundChannel " +
+                "type=0x${lastInboundType.toString(16)} at framesSent=$framesSentAtLastInbound, " +
+                "now framesSent=$framesSent, ${queueBacklog()}, awake=${scope.isActive})")
+        }
+    }
+
     private fun logW(msg: String) {
         Log.w(TAG, msg)
         FileLogger.log(TAG, msg)
+    }
+
+    /**
+     * Signal a terminal connection state so observers (MainActivity) can re-arm
+     * the Start button and allow a fresh connection without killing the app.
+     * Previously the service never published ERROR/DISCONNECTED on failure, so
+     * `serviceStarted` stayed true forever and no reconnect was possible.
+     */
+    private fun signalDisconnected(reason: String) {
+        if (ServiceState.connectionState.value != ServiceState.ConnectionState.ERROR) {
+            logW("Connection lost: $reason")
+            ServiceState.connectionState.value = ServiceState.ConnectionState.ERROR
+            ServiceState.addEvent("Disconnected: $reason")
+        }
     }
 
     // Channel handlers - keyed by channel ID from service discovery
@@ -97,11 +165,85 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         } else {
             logW("No MediaProjection - will send black frames")
         }
-        scope.launch { startSession() }
+        scope.launch { sessionWithReconnect() }
         return START_NOT_STICKY
     }
 
+    /**
+     * Runs the projection session, and on disconnect automatically retries while
+     * the USB accessory is still physically attached. This removes the need to
+     * unplug/replug and restart the app after a head-unit disconnect.
+     *
+     * On each EIO the head-unit drops VBUS, so the accessory disappears; once it
+     * is plugged back in, the retry loop re-establishes the session in-place.
+     */
+    private suspend fun sessionWithReconnect() {
+        var attempt = 0
+        while (scope.isActive) {
+            attempt++
+            logW("Session attempt #$attempt")
+            startSession()
+            if (!scope.isActive) break
+
+            // startSession returned => the session ended (EOF/EIO/exception).
+            signalDisconnected("session ended")
+            val usbPresent = isUsbAccessoryAttached()
+            logW("Session attempt #$attempt ended. USB accessory attached=$usbPresent")
+            if (!usbPresent) {
+                logW("No USB accessory attached — stopping service (plug in to reconnect)")
+                break
+            }
+            // Accessory still present: back off briefly and retry in-place.
+            val delayMs = 1000L
+            logW("Retrying in ${delayMs}ms...")
+            delay(delayMs)
+            resetForReconnect()
+        }
+        stopSelf()
+    }
+
+    /** Returns true if a USB accessory is currently attached. */
+    private fun isUsbAccessoryAttached(): Boolean = try {
+        val usbManager = getSystemService(android.hardware.usb.UsbManager::class.java)
+        usbManager?.accessoryList?.isNotEmpty() == true
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Tear down per-session state so a fresh attempt starts clean. */
+    private suspend fun resetForReconnect() {
+        try { transport?.disconnect() } catch (_: Exception) {}
+        transport = null
+        protocolEngine = null
+        inBandTls = null
+        videoChannel?.stop()
+        audioOutputChannel?.stop()
+        audioInputChannel?.stop()
+        videoChannel = null
+        inputChannel = null
+        audioOutputChannel = null
+        audioInputChannel = null
+        sensorChannel = null
+        while (priorityWriteQueue.tryReceive().isSuccess) { /* drain */ }
+        while (writeQueue.tryReceive().isSuccess) { /* drain */ }
+        enqueued = 0; written = 0
+        framesSent = 0; framesReceived = 0
+        // Stay in CONNECTING (not ERROR) so MainActivity keeps serviceStarted=true
+        // and doesn't try to start a second service while we're retrying in-place.
+        ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTING
+    }
+
     override fun onDestroy() {
+        // Final stall characterisation: if the HU went quiet before we tore down,
+        // this captures the exact gap and backlog so the next session is comparable.
+        val finalSilence = inboundSilenceMs()
+        val acks = acksByType.entries.joinToString(",") { "0x${it.key.toString(16)}=${it.value}" }
+        val inb = inboundByType.entries.joinToString(",") { "0x${it.key.toString(16)}=${it.value}" }
+        logW("TEARDOWN: silenceAtEnd=${finalSilence}ms ${queueBacklog()} " +
+            "pingsSent=$pingSentCount pongsRecv=$pongCount")
+        logW("TEARDOWN lastInbound ch=$lastInboundChannel type=0x${lastInboundType.toString(16)} " +
+            "framesSentAtLastInbound=$framesSentAtLastInbound")
+        logW("TEARDOWN inbound[$inb] acksVideo[$acks]")
         logW("Service destroying. Frames sent=$framesSent received=$framesReceived")
         FileLogger.close()
         scope.cancel()
@@ -183,7 +325,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         } catch (e: Exception) {
             Log.e(TAG, "Session failed: ${e.message}", e)
             updateNotification("Error: ${e.message}")
-            stopSelf()
+            signalDisconnected("session failed: ${e.message}")
+            // Return to sessionWithReconnect, which decides whether to retry.
         }
     }
 
@@ -203,7 +346,11 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             val pos = buffer.position()
             val rawHex = StringBuilder()
             for (i in 0 until minOf(pos, 32)) { rawHex.append(String.format("%02x ", buffer[i])) }
-            logW("RAW ← $pos bytes: $rawHex")
+            // Log the silence gap before this read: if the HU was quiet, this shows how long.
+            val gap = inboundSilenceMs()
+            val gapNote = if (lastInboundMs != 0L) " [gap=${gap}ms]" else ""
+            logW("RAW ← $pos bytes$gapNote: $rawHex")
+            markInbound(-1, -1) // updated with real channel/type once decoded
 
             buffer.flip()
             val messages = decoder.decode(buffer)
@@ -214,7 +361,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             }
         }
         logW("Read loop ended")
-        stopSelf()
+        // Do NOT stopSelf here — sessionWithReconnect decides whether to retry.
     }
 
     private suspend fun writeLoop() {
@@ -226,6 +373,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                     ?: writeQueue.tryReceive().getOrNull()
                 if (frame != null) {
                     transport?.write(ByteBuffer.wrap(frame))
+                    written++
+                    reportStallIfSilent()
                 } else {
                     // Wait for either queue using select
                     val selected = kotlinx.coroutines.selects.select<ByteArray> {
@@ -233,6 +382,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                         writeQueue.onReceive { it }
                     }
                     transport?.write(ByteBuffer.wrap(selected))
+                    written++
+                    reportStallIfSilent()
                 }
             }
         } catch (e: Exception) {
@@ -289,6 +440,9 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         }
 
         logW("← ch=$chId type=0x${type.toString(16)} len=${payload.size} enc=${isEncryptedFrame || isTlsRecord} ctrl=$isControl")
+        markInbound(chId, type)
+        // Video ACK (0x8004) is the HU's per-frame flow-control signal — count it.
+        if (type == 0x8004 || type == 0x8003 || type == 0x8002) markAck(type)
 
         // Log hex for short/unknown messages for debugging
         if (payload.size <= 10) {
@@ -375,6 +529,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                     MessageFramer.buildFrame(header, encrypted)
                 }
                 queue.trySend(frame)
+                enqueued++
             }
             return
         }
@@ -385,7 +540,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         val useEncryptedFlag = shouldEncrypt && !isPlainMessage
         val frames = MessageFramer.encode(channelId, encrypted, control, encrypted = useEncryptedFlag)
         val queue = if (channelId.toInt() == 0) priorityWriteQueue else writeQueue
-        frames.forEach { frame -> queue.trySend(frame) }
+        frames.forEach { frame -> queue.trySend(frame); enqueued++ }
     }
 
     override fun onTlsData(data: ByteArray) {
@@ -610,12 +765,45 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         updateNotification("Connected")
         // HUIG: "User launches AAP → MD sends RELEASE request to HU so the HU has default audio focus"
         protocolEngine?.sendAudioFocusRequest(4) // RELEASE=4
+        lastInboundMs = System.currentTimeMillis() // avoid a false stall at start
         // Start sending periodic pings to keep connection alive
         scope.launch {
             while (scope.isActive) {
                 delay(1000)
-                protocolEngine?.sendPingRequest(System.currentTimeMillis() * 1000)
+                val tsUs = System.currentTimeMillis() * 1000
+                protocolEngine?.sendPingRequest(tsUs)
+                pingSentCount++
+                // If the HU hasn't answered the previous ping, flag it: this is the
+                // earliest observable sign of the stall (before EIO).
+                // >2s without any inbound (idle cadence is ~790ms) = possible stall.
+                if (inboundSilenceMs() > 2000) {
+                    logW("PING: no inbound for ${inboundSilenceMs()}ms; " +
+                        "ping#${pingSentCount} ts=${tsUs}us, ${queueBacklog()}, " +
+                        "framesSent=$framesSent framesRecv=$framesReceived")
+                }
             }
+        }
+        // Periodic health log every 5s: trends the smooth degrade into the stall.
+        scope.launch {
+            while (scope.isActive) {
+                delay(5000)
+                val acks = acksByType.entries.joinToString(",") { "0x${it.key.toString(16)}=${it.value}" }
+                val inb = inboundByType.entries.joinToString(",") { "0x${it.key.toString(16)}=${it.value}" }
+                logW("HEALTH: pingSent=$pingSentCount silence=${inboundSilenceMs()}ms " +
+                    "${queueBacklog()} framesSent=$framesSent framesRecv=$framesReceived")
+                logW("HEALTH inbound[$inb] acksVideo[$acks]")
+            }
+        }
+    }
+
+    override fun onPingResponse(echoedTimestampUs: Long) {
+        pongCount++
+        // RTT in ms: our ping timestamp is micros; HU echoes it back.
+        val rttMs = (System.currentTimeMillis() * 1000 - echoedTimestampUs) / 1000
+        markInbound(0, ControlMessageType.PING_RESPONSE)
+        // Log every pong while healthy, but always log if RTT is anomalous.
+        if (pongCount % 5 == 0L || rttMs > 500 || rttMs < 0) {
+            logW("PONG: #$pongCount rtt=${rttMs}ms silenceBefore=${inboundSilenceMs()}ms")
         }
     }
 
