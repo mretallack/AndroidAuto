@@ -192,6 +192,9 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 if (ServiceState.connectionState.value != ServiceState.ConnectionState.CONNECTED &&
                     ServiceState.connectionState.value != ServiceState.ConnectionState.STREAMING) {
                     logW("Attempt #$attempt: no handshake within 8s — aborting attempt")
+                    // Close the transport BEFORE cancelling: the read/accept is a
+                    // blocking native call that only returns once the fd is closed.
+                    try { transport?.disconnect() } catch (_: Exception) {}
                     sessionJob?.cancel()
                 }
             }
@@ -232,14 +235,30 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     }
 
     /**
-     * Tear down the loops and transport for the current attempt. Cancels the
-     * per-session child jobs so no stale loop survives into the next attempt.
+     * Tear down the loops and transport for the current attempt.
+     *
+     * Order matters: a blocking USB/`accept()` call cannot be interrupted by
+     * coroutine cancellation, so we must first CLOSE the transport (which makes
+     * the in-flight read throw and return), and only then join the loop jobs.
+     * The join is bounded so teardown can never hang the reconnect loop.
      */
     private suspend fun teardownSession() {
-        sessionJob?.cancelAndJoin()
-        sessionJob = null
-        try { transport?.disconnect() } catch (_: Exception) {}
+        val t = transport
         transport = null
+        // 1. Unblock any in-flight read()/accept() by closing the fd/socket.
+        if (t != null) {
+            try { withTimeoutOrNull(2000) { t.disconnect() } } catch (_: Exception) {}
+        }
+        // 2. Now the loops can finish; give them a bounded window to do so.
+        val job = sessionJob
+        sessionJob = null
+        if (job != null) {
+            job.cancel()
+            val joined = withTimeoutOrNull(2000) { job.join() }
+            if (joined == null) {
+                logW("teardownSession: loop did not stop within 2s (abandoning)")
+            }
+        }
     }
 
     /** Tear down per-session state so a fresh attempt starts clean. */
@@ -356,7 +375,11 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             }
 
             sessionScope.launch { writeLoop() }
-            readLoop(activeTransport, sessionScope)
+            // Run the read loop as a child job (not inline) so the watchdog /
+            // teardown can cancel the session as a unit. `readLoop` returns when
+            // the transport is closed or cancelled; the caller awaits it here.
+            val reader = sessionScope.launch { readLoop(activeTransport, sessionScope) }
+            reader.join()
         } catch (e: Exception) {
             Log.e(TAG, "Session failed: ${e.message}", e)
             updateNotification("Error: ${e.message}")

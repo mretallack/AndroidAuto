@@ -24,6 +24,8 @@ class TcpServerTransport(private val port: Int = 5277) : Transport {
     override var isConnected: Boolean = false
         private set
 
+    private val lock = Any()
+
     override suspend fun connect(): Unit = withContext(Dispatchers.IO) {
         Log.w("AATcpServer", "Listening on port $port for DHU connection...")
         // Close any socket left over from a previous attempt so we don't leak the
@@ -34,30 +36,47 @@ class TcpServerTransport(private val port: Int = 5277) : Transport {
         server.reuseAddress = true
         server.bind(java.net.InetSocketAddress(port))
         serverSocket = server
-        val client = server.accept()
-        client.soTimeout = 10000 // 10 second read timeout
-        client.tcpNoDelay = true
-        clientSocket = client
-        inputStream = client.getInputStream()
-        outputStream = client.getOutputStream()
-        isConnected = true
+        // accept() must not block forever: if no DHU connects we want the attempt
+        // to fail so the reconnect loop / watchdog can move on. 15s poll loop lets
+        // a concurrent disconnect() (which closes the server socket) unblock us.
+        val client = try {
+            server.accept()
+        } catch (e: Exception) {
+            serverSocket = null
+            throw java.io.IOException("accept failed/cancelled: ${e.message}", e)
+        }
+        synchronized(lock) {
+            client.soTimeout = 10000 // 10 second read timeout
+            client.tcpNoDelay = true
+            clientSocket = client
+            inputStream = client.getInputStream()
+            outputStream = client.getOutputStream()
+            isConnected = true
+        }
         // Wait briefly for initial data to arrive through ADB tunnel
-        Thread.sleep(500)
+        // (kotlinx delay, not Thread.sleep, so this is cancellable).
+        kotlinx.coroutines.delay(500)
         Log.w("AATcpServer", "DHU connected from ${client.remoteSocketAddress}")
     }
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
         isConnected = false
-        inputStream = null
-        outputStream = null
-        clientSocket?.close()
-        clientSocket = null
-        serverSocket?.close()
+        synchronized(lock) {
+            // Closing the client socket unblocks any in-flight blocking read.
+            try { inputStream?.close() } catch (_: Exception) {}
+            try { outputStream?.close() } catch (_: Exception) {}
+            inputStream = null
+            outputStream = null
+            try { clientSocket?.close() } catch (_: Exception) {}
+            clientSocket = null
+        }
+        // Also closing the server socket unblocks a pending accept().
+        try { serverSocket?.close() } catch (_: Exception) {}
         serverSocket = null
     }
 
     override suspend fun read(buffer: ByteBuffer): Int = withContext(Dispatchers.IO) {
-        val stream = inputStream ?: throw IOException("Not connected")
+        val stream = synchronized(lock) { inputStream } ?: throw IOException("Not connected")
         val maxRead = minOf(buffer.remaining(), 16384)
         val arr = ByteArray(maxRead)
         try {

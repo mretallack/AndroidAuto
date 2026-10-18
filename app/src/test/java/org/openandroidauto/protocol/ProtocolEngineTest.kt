@@ -39,6 +39,7 @@ class ProtocolEngineTest {
         override fun onAudioFocusResponse(focusState: Int) {}
         override fun onNavigationFocusRequest(type: Int) {}
         override fun onVoiceSessionRequest(type: Int) {}
+        override fun onPingResponse(echoedTimestampUs: Long) {}
     }
 
     @Before

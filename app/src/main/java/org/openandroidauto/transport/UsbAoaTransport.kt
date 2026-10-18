@@ -47,20 +47,37 @@ class UsbAoaTransport(private val context: Context) : Transport {
         isConnected = true
     }
 
+    // Guards the fd/stream handles. A blocking read(g) cannot be interrupted by
+    // coroutine cancellation, so disconnect() closes the descriptor out from under
+    // it — that makes the in-flight read throw and return. This is the standard
+    // way to unblock a native USB read.
+    private val lock = Any()
+
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
         isConnected = false
-        inputStream?.close()
-        outputStream?.close()
-        fileDescriptor?.close()
-        inputStream = null
-        outputStream = null
-        fileDescriptor = null
+        synchronized(lock) {
+            // Close in this order; each is best-effort so one failure still lets
+            // us release the rest and, crucially, unblock any pending read().
+            try { inputStream?.close() } catch (_: Exception) {}
+            try { outputStream?.close() } catch (_: Exception) {}
+            try { fileDescriptor?.close() } catch (_: Exception) {}
+            inputStream = null
+            outputStream = null
+            fileDescriptor = null
+        }
     }
 
     override suspend fun read(buffer: ByteBuffer): Int = withContext(Dispatchers.IO) {
-        val stream = inputStream ?: throw IOException("Not connected")
+        val stream = synchronized(lock) { inputStream } ?: throw IOException("Not connected")
         val len = minOf(buffer.remaining(), readBuf.size)
-        val read = stream.read(readBuf, 0, len)
+        // A concurrent disconnect() closes `stream`, which makes this read throw
+        // IOException("Stream closed") / EBADF instead of blocking forever.
+        val read = try {
+            stream.read(readBuf, 0, len)
+        } catch (e: IOException) {
+            isConnected = false
+            throw e
+        }
         if (read > 0) buffer.put(readBuf, 0, read)
         read
     }

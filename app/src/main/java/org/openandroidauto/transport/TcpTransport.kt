@@ -13,6 +13,7 @@ import java.nio.channels.SocketChannel
 class TcpTransport(private val host: String, private val port: Int) : Transport {
 
     private var channel: SocketChannel? = null
+    private val lock = Any()
 
     override var isConnected: Boolean = false
         private set
@@ -27,13 +28,21 @@ class TcpTransport(private val host: String, private val port: Int) : Transport 
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
         isConnected = false
-        channel?.close()
-        channel = null
+        // Closing the channel unblocks any in-flight blocking read.
+        synchronized(lock) {
+            try { channel?.close() } catch (_: Exception) {}
+            channel = null
+        }
     }
 
     override suspend fun read(buffer: ByteBuffer): Int = withContext(Dispatchers.IO) {
-        val ch = channel ?: throw IOException("Not connected")
-        val read = ch.read(buffer)
+        val ch = synchronized(lock) { channel } ?: throw IOException("Not connected")
+        val read = try {
+            ch.read(buffer)
+        } catch (e: java.nio.channels.ClosedChannelException) {
+            isConnected = false
+            throw IOException("Channel closed", e)
+        }
         if (read < 0) { isConnected = false }
         read
     }

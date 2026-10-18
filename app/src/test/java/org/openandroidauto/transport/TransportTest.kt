@@ -1,6 +1,9 @@
 package org.openandroidauto.transport
 
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -100,4 +103,46 @@ class TransportTest {
         readBuf.get(result)
         assertArrayEquals("abcd".toByteArray(), result)
     }
+
+    @Test
+    fun `disconnect unblocks a read that is parked waiting for data`() = runTest {
+        // Regression test for the reconnect deadlock (2026-10-18): a blocking
+        // read cannot be interrupted by coroutine cancellation alone, so
+        // disconnect() must make it return. This models that contract.
+        val blocking = BlockingTransport()
+        blocking.connect()
+
+        val reader = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+        val job = reader.launch {
+            try { blocking.read(ByteBuffer.allocate(16)) } catch (_: IOException) { }
+        }
+
+        // Let the read block, then release it via disconnect.
+        kotlinx.coroutines.delay(100)
+        blocking.disconnect()
+
+        val joined = kotlinx.coroutines.withTimeoutOrNull(2000) { job.join() }
+        assertNotNull("read must return after disconnect (no deadlock)", joined)
+    }
+}
+
+/**
+ * Transport whose read parks until disconnect() is called, mimicking a blocking
+ * USB/accept() call.
+ */
+private class BlockingTransport : Transport {
+    override var isConnected: Boolean = false
+        private set
+    private val latch = java.util.concurrent.CountDownLatch(1)
+
+    override suspend fun connect() { isConnected = true }
+    override suspend fun disconnect() {
+        isConnected = false
+        latch.countDown() // release the parked read
+    }
+    override suspend fun read(buffer: ByteBuffer): Int {
+        latch.await()
+        throw IOException("closed")
+    }
+    override suspend fun write(buffer: ByteBuffer) { }
 }

@@ -46,6 +46,7 @@ class ProtocolIntegrationTest {
         var audioFocusType = -1
         var navFocusType = -1
         var voiceSessionType = -1
+        var pingEcho = -1L
 
         override fun onSendFrame(channelId: UByte, payload: ByteArray, control: Boolean) {
             sentFrames.add(Triple(channelId, payload, control))
@@ -64,6 +65,7 @@ class ProtocolIntegrationTest {
         override fun onAudioFocusResponse(focusState: Int) {}
         override fun onNavigationFocusRequest(type: Int) { navFocusType = type }
         override fun onVoiceSessionRequest(type: Int) { voiceSessionType = type }
+        override fun onPingResponse(echoedTimestampUs: Long) { pingEcho = echoedTimestampUs }
 
         /** Find sent frame by channel and type */
         fun findSent(channelId: Int, messageType: Int): Triple<UByte, ByteArray, Boolean>? {
