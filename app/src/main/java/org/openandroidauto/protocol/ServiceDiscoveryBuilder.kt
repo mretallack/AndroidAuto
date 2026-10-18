@@ -75,9 +75,16 @@ object ServiceDiscoveryBuilder {
         val out = ByteArrayOutputStream()
         // stream_type (field 1) = VIDEO(3)
         writeVarintField(out, 1, 3)
-        // video_configs (field 4, repeated) - 720p 30fps
-        writeField(out, 4, buildVideoConfig(2, 1, 0, 0, 160)) // 720p, 30fps
-        writeField(out, 4, buildVideoConfig(1, 1, 0, 0, 160)) // 480p, 30fps
+        // video_configs (field 4, repeated).
+        // Advertise ONLY the configuration we actually encode: 800x480 @ 30 fps.
+        // Previously we advertised 720p and 480p but encoded 800x480/15, so the
+        // negotiated config never matched what the HU received (see §9b in
+        // docs/connection-stability.md). 800x480 is the HUIG's guaranteed
+        // baseline (H.264 BP level 3.1) and what any HU must support.
+        // aasdk VideoResolutionEnum: NONE=0, _480p=1, _720p=2, _1080p=3
+        // aasdk VideoFPSEnum:        NONE=0, _30=1, _60=2
+        // _480p is the decode size (800x480); _30 = 30 fps.
+        writeField(out, 4, buildVideoConfig(1, 1, 0, 0, 160)) // 480p (800x480), 30fps
         return out.toByteArray()
     }
 

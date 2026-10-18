@@ -297,6 +297,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         logW("TEARDOWN lastInbound ch=$lastInboundChannel type=0x${lastInboundType.toString(16)} " +
             "framesSentAtLastInbound=$framesSentAtLastInbound")
         logW("TEARDOWN inbound[$inb] acksVideo[$acks]")
+        // Video budget: frames/bytes the HU accepted vs. how long it lasted.
+        videoChannel?.let { logW("TEARDOWN video budget: ${it.budgetSummary()}") }
         logW("Service destroying. Frames sent=$framesSent received=$framesReceived")
         FileLogger.close()
         scope.cancel()
@@ -898,6 +900,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 logW("HEALTH: pingSent=$pingSentCount silence=${inboundSilenceMs()}ms " +
                     "${queueBacklog()} framesSent=$framesSent framesRecv=$framesReceived")
                 logW("HEALTH inbound[$inb] acksVideo[$acks]")
+                // Video budget trend (§16 item 3): cumulative frames/bytes vs time.
+                videoChannel?.let { logW("HEALTH video: ${it.budgetSummary()}") }
             }
         }
     }

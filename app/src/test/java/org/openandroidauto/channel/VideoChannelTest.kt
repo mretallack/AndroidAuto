@@ -67,6 +67,34 @@ class VideoChannelTest {
     }
 
     @Test
+    fun `CONFIG parses the HU's chosen config index`() {
+        channel.sendSetup()
+        // CONFIG: status=READY(2), max_unacked=100, config_index=1 (_480p)
+        channel.onMessage(AVMessageType.SETUP_RESPONSE, byteArrayOf(0x08, 0x02, 0x10, 0x64, 0x18, 0x01))
+        assertEquals(1, channel.selectedConfigIndex)
+    }
+
+    @Test
+    fun `START echoes the config index the HU selected`() {
+        channel.sendSetup()
+        // HU picks index 2
+        channel.onMessage(AVMessageType.SETUP_RESPONSE, byteArrayOf(0x08, 0x02, 0x10, 0x64, 0x18, 0x02))
+        cb.messages.clear()
+
+        channel.onMessage(AVMessageType.VIDEO_FOCUS_INDICATION, byteArrayOf(0x08, 0x01, 0x10, 0x01))
+
+        // START_INDICATION body: 08 <session> 10 <configIndex>
+        val start = cb.messages.firstOrNull {
+            val t = ((it.second[0].toInt() and 0xFF) shl 8) or (it.second[1].toInt() and 0xFF)
+            t == AVMessageType.START_INDICATION
+        }
+        assertNotNull(start)
+        val body = start!!.second.drop(2)
+        assertEquals(0x10.toByte(), body[2]) // field 2 tag
+        assertEquals(2.toByte(), body[3])    // config index echoed back
+    }
+
+    @Test
     fun `VIDEO_FOCUS_NOTIFICATION with PROJECTED moves to FOCUSED and sends START`() {
         channel.sendSetup()
         // Receive CONFIG
@@ -150,10 +178,13 @@ class VideoChannelTest {
     // --- Frame format ---
 
     @Test
-    fun `default config is 800x480 15fps`() {
+    fun `default config is the HUIG baseline 800x480 30fps`() {
+        // HUIG: 800x480 @ 30 fps is the guaranteed baseline (H.264 BP level 3.1).
+        // We must advertise and encode the same config; see §9b in
+        // docs/connection-stability.md.
         assertEquals(800, channel.config.width)
         assertEquals(480, channel.config.height)
-        assertEquals(15, channel.config.fps)
+        assertEquals(30, channel.config.fps)
     }
 
     @Test

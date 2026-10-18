@@ -24,13 +24,31 @@ object AVMessageType {
     const val VIDEO_FOCUS_INDICATION: Int = 0x8008
 }
 
+/**
+ * Video configuration. Defaults follow the HUIG guaranteed baseline:
+ * 800x480 @ 30 fps, H.264 Baseline Profile level 3.1 (§9b in
+ * docs/connection-stability.md). Non-standard resolutions cause "significant
+ * performance loss" per the spec, so we only ever advertise/encode this one.
+ */
 data class VideoConfig(
     val width: Int = 800,
     val height: Int = 480,
-    val fps: Int = 15,
+    val fps: Int = 30,
     val dpi: Int = 160,
     val bitrate: Int = 250_000
-)
+) {
+    companion object {
+        /**
+         * aasdk VideoResolutionEnum: NONE=0, _480p=1, _720p=2, _1080p=3.
+         * There is no explicit 800x480 entry — `_480p` is the 800x480 decode
+         * size and the HUIG's required baseline. We only advertise/support it.
+         */
+        const val RESOLUTION_480p = 1
+
+        /** The single configuration we advertise and encode. */
+        fun baseline() = VideoConfig()
+    }
+}
 
 interface VideoChannelCallback {
     fun onVideoFrame(channelId: UByte, payload: ByteArray)
@@ -56,6 +74,9 @@ class VideoChannel(
     var maxUnacked: Int = 1
         private set
     var sessionId: Int = 1
+        private set
+    // Index chosen by the HU in its CONFIG message; echoed in START (§9b).
+    var selectedConfigIndex: Int = VideoConfig.RESOLUTION_480p
         private set
 
     private var mediaProjection: MediaProjection? = null
@@ -94,11 +115,13 @@ class VideoChannel(
 
     /** Send START indication to begin streaming */
     fun sendStart() {
-        // Start: field 1 (session_id) varint, field 2 (config) varint
-        val payload = byteArrayOf(0x08, sessionId.toByte(), 0x10, 0x00) // session=1, config=0
+        // Start: field 1 (session_id) varint, field 2 (configuration index) varint.
+        // The index must echo the HU's choice from its CONFIG message (§9b), not a
+        // hardcoded 0 — the HU sends a prioritised list and expects us to confirm.
+        val payload = byteArrayOf(0x08, sessionId.toByte(), 0x10, selectedConfigIndex.toByte())
         sendMessage(AVMessageType.START_INDICATION, payload)
         state = VideoState.STARTED
-        Log.w(TAG, "Sent START (session=$sessionId), state=STARTED")
+        Log.w(TAG, "Sent START (session=$sessionId, configIndex=$selectedConfigIndex), state=STARTED")
         startEncoding()
     }
 
@@ -146,11 +169,11 @@ class VideoChannel(
                 when (field) {
                     1 -> status = value
                     2 -> maxUnacked = value
-                    3 -> {} // config index
+                    3 -> selectedConfigIndex = value // HU's chosen index (we send it back in START)
                 }
             } else break
         }
-        Log.w(TAG, "CONFIG received: status=$status max_unacked=$maxUnacked")
+        Log.w(TAG, "CONFIG received: status=$status max_unacked=$maxUnacked configIndex=$selectedConfigIndex")
         if (status == 2) { // STATUS_READY
             state = VideoState.CONFIGURED
             Log.w(TAG, "Video configured, waiting for FOCUS")
@@ -244,33 +267,50 @@ class VideoChannel(
                 )
                 val barWidth = config.width / 8
 
+                // Event-driven: when enabled, only post a frame when the rendered
+                // content actually changes, plus a periodic idle frame so the HU
+                // decoder does not starve (HUIG: send "enough idle frames").
+                val eventDriven = ServiceState.eventDrivenVideo.value
+                val idleIntervalMs = 2000L   // idle frame cadence (>= 5fps floor is for changes)
+                var lastPostMs = 0L
+                var lastCounterShown = -1
+
                 while (running) {
                     val startTime = System.currentTimeMillis()
                     val surface = inputSurface ?: break
-                    val c = surface.lockCanvas(null)
-                    if (c != null) {
-                        // Draw static color bars (never change)
-                        for (i in 0 until 8) {
-                            paint.color = colors[i]
-                            c.drawRect(
-                                (i * barWidth).toFloat(), 0f,
-                                ((i + 1) * barWidth).toFloat(), config.height.toFloat(), paint
-                            )
-                        }
-                        // Frame counter - only changes every 100 frames (slow update)
-                        paint.color = 0xFF000000.toInt()
-                        c.drawRect(0f, 30f, 250f, 70f, paint) // clear text area
-                        paint.color = 0xFFFFFFFF.toInt()
-                        paint.textSize = 40f
-                        c.drawText("Frame: ${frameNum / 100 * 100}", 20f, 60f, paint)
-                        surface.unlockCanvasAndPost(c)
-                        frameNum++
-                    }
 
-                    // Exact frame pacing
+                    // What would we draw? The counter only visibly changes every 100 frames.
+                    val counterShown = frameNum / 100 * 100
+                    val contentChanged = counterShown != lastCounterShown
+                    val needIdle = (startTime - lastPostMs) >= idleIntervalMs
+
+                    if (!eventDriven || contentChanged || needIdle) {
+                        val c = surface.lockCanvas(null)
+                        if (c != null) {
+                            // Draw static color bars
+                            for (i in 0 until 8) {
+                                paint.color = colors[i]
+                                c.drawRect(
+                                    (i * barWidth).toFloat(), 0f,
+                                    ((i + 1) * barWidth).toFloat(), config.height.toFloat(), paint
+                                )
+                            }
+                            paint.color = 0xFF000000.toInt()
+                            c.drawRect(0f, 30f, 250f, 70f, paint) // clear text area
+                            paint.color = 0xFFFFFFFF.toInt()
+                            paint.textSize = 40f
+                            c.drawText("Frame: $counterShown", 20f, 60f, paint)
+                            surface.unlockCanvasAndPost(c)
+                            lastCounterShown = counterShown
+                            lastPostMs = startTime
+                        }
+                    }
+                    frameNum++
+
+                    // Pace only the content-change frames; idle ticks are cheap.
                     val elapsed = System.currentTimeMillis() - startTime
                     val sleepMs = frameIntervalMs - elapsed
-                    if (sleepMs > 0) Thread.sleep(sleepMs)
+                    if (sleepMs > 0) Thread.sleep(if (eventDriven && !needIdle) 20L else sleepMs)
                 }
             }.apply {
                 name = "AA-TestPattern"
@@ -451,14 +491,35 @@ class VideoChannel(
         return if (output.size() > 0) output.toByteArray() else data
     }
 
+    /**
+     * Budget summary for logging on teardown (§16 item 3). Frames/bytes are the
+     * cumulative totals the HU was asked to accept; acked is how many it confirmed.
+     */
+    fun budgetSummary(): String =
+        "videoFramesSent=$framesSent videoBytesSent=$bytesSent " +
+        "videoFramesAcked=$framesAcked videoBytesAcked=$bytesAcked " +
+        "unacked=$unackedFrames maxUnacked=$maxUnacked"
+
     private fun handleMediaAck(payload: ByteArray) {
+        framesAcked++
         synchronized(unackedLock) {
             unackedFrames = (unackedFrames - 1).coerceAtLeast(0)
             (unackedLock as Object).notifyAll()
         }
     }
 
+    // ── Ack/byte budget instrumentation (§16 item 3) ──
+    // Hypothesis: the HU enforces a cumulative frame/byte budget and drops VBUS
+    // when exceeded ("more data → faster death"). These counters let us compare
+    // frames/bytes accepted vs time-to-disconnect across sessions.
+    @Volatile var framesSent: Long = 0L; private set
+    @Volatile var bytesSent: Long = 0L; private set
+    @Volatile var framesAcked: Long = 0L; private set
+    @Volatile var bytesAcked: Long = 0L; private set
+
     private fun sendVideoFrame(nalData: ByteArray, timestampUs: Long) {
+        framesSent++
+        bytesSent += nalData.size
         // Flow control: wait if too many unacked frames
         synchronized(unackedLock) {
             if (unackedFrames >= maxUnacked) {

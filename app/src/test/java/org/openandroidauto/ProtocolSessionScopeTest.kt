@@ -65,6 +65,10 @@ class ProtocolSessionScopeTest {
 
         withTimeoutOrNull(2000) { failing.join() }
         withTimeoutOrNull(2000) { sibling.join() }
+        // The handler fires from the failing coroutine's thread; poll briefly so
+        // the assertion is not racy against that dispatch.
+        val deadline = System.currentTimeMillis() + 2000
+        while (captured.get() == null && System.currentTimeMillis() < deadline) delay(10)
 
         assertNotNull("handler should have received the failure", captured.get())
         assertTrue("sibling coroutine must survive a sibling failure", siblingRan.get())

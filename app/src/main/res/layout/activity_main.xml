@@ -183,6 +183,23 @@
                     android:layout_height="wrap_content"
                     android:checked="true"/>
             </LinearLayout>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:text="Event-Driven Video (only on UI change)"
+                    android:textColor="#FFCCCCCC"/>
+                <Switch
+                    android:id="@+id/swEventDriven"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true"/>
+            </LinearLayout>
         </LinearLayout>
 
         <!-- Vehicle Data Section -->

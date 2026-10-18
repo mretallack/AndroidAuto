@@ -77,12 +77,80 @@ The HU advertises 9 channels in SERVICE_DISCOVERY_RESPONSE. We open 5 (video, in
 - **Fix:** Explicitly set `KEY_PROFILE = AVCProfileBaseline` and `KEY_LEVEL = AVCLevel31` on the encoder format.
 - **Status:** Fixed 2026-06-04.
 
-## 10. Event-Driven Video (Investigation ❓)
+## 9b. Video resolution negotiation — we advertise one thing, encode another (TODO 🔴)
 
-- **HUIG Requirement:** "The AAP protocol sends video frames only for projection UI updates (and does not send frames when no updates are available)"
-- **Current:** Test pattern sends frames continuously at fixed FPS regardless of content changes.
-- **Question:** Does the HU enforce this? The official app likely sends 1-5fps average (only on UI change). Our 15-30fps constant stream is unusual but the HU has flow control (ACKs) to handle it. Lower FPS = longer survival, which is consistent with either buffer exhaustion OR the HU not expecting continuous data.
-- **Note:** During active phone use (scrolling, animations), frames would be sent continuously anyway. This may only matter for the test pattern.
+**HUIG says (Integrating Video / Selecting Video Resolution):**
+- "During initial service discovery, the MD and HU negotiate the screen resolution,
+  density, pixel aspect ratio (PAR), and maximum frame rate... The MD renders and
+  encodes content in the negotiated configuration (**no upscaling or downscaling
+  required**)."
+- Negotiation flow: (1) MD requests HU's `VideoConfigurations` in service discovery;
+  (2) **HU sends a Config Message with a prioritised list of indices** (most
+  preferred first); (3) MD selects based on HU preference + encoder capability;
+  (4) MD sends `Start` **with the index of the selected configuration**.
+- Required baselines: "**800x480 @ 30 FPS**" (H.264 BP level 3.1 REQUIRED for both
+  sides); "Any AAP HU integration MUST support **480p at 30 FPS** as the minimum
+  default." "Using non-standard codec resolutions can result in significant
+  performance loss."
+
+**What we do (wrong):**
+- `ServiceDiscoveryBuilder.kt:79-80` advertises `buildVideoConfig(2,...)` = 720p/30
+  and `buildVideoConfig(1,...)` = 480p/30 — **neither of which we encode**.
+- `VideoConfig` default is **800×480 @ 15 fps**; `VideoChannel.startEncoding()` builds
+  the `MediaFormat` from that default, so we encode 800×480/15 regardless.
+- `VideoChannel.sendStart()` hardcodes `session=1, config=0` — we do **not** parse the
+  HU's prioritised config list (`0x8003` CONFIG carries `config_index` in field 3); we
+  just always claim index 0.
+- Net: we declare 720p/480p at 30 fps and deliver 800×480 at 15 fps. The HU negotiated
+  in bad faith on our side. Plausible trigger for a decoder-pipeline watchdog.
+
+**TODO:**
+1. Advertise exactly one config we can actually produce: **800x480 @ 30 fps** (the
+   spec's guaranteed baseline), and drop the 720p entry until we can encode it.
+2. Parse the HU's `0x8003` CONFIG `config_index` (field 3) and echo that index in the
+   `0x8001` START (field 2) instead of hardcoding 0.
+3. Encode at the negotiated resolution — build `VideoConfig` from the selected entry,
+   not from the 800×480/15 default. (15→30 fps is part of this; see §10 on cadence.)
+
+## 10. Event-Driven Video (TODO 🔴 — HUIG requires it)
+
+**HUIG requirement (verbatim, Integrating Video):**
+> "To preserve bandwidth and power, the AAP protocol sends video frames **only for
+> projection UI updates** (and does not send frames when no updates are available).
+> However, HU video decoders MUST avoid adversely affecting latency by not entering
+> power-saving mode even when not receiving frames."
+
+And on pipeline depth:
+> "Because the MD does **not render continuously**, the HU MUST report the depth of
+> its decoder pipeline so the MD can send **enough idle frames** to ensure the display
+> updates properly."
+
+So the contract is: **send a frame only when the screen changes**, plus periodic
+*idle* frames to honour the HU's reported decoder depth. A constant 15 fps flood is a
+spec violation, not merely "unusual".
+
+**What we do (wrong):** `VideoChannel` runs a fixed-fps loop and emits a frame every
+~66 ms forever, regardless of content change. Measured on the 2026-10-18 15:55 run:
+
+```
+frames: 1226   gap ms: min=34  p50=66  p90=70  max=79   (zero gaps >200 ms)
+sizes: 1110 frames <100 B (near-identical static P-frames), avg 400 B, ~47 kbps
+```
+
+i.e. ~15 fps of mostly-identical frames for 83 s on a *static black* screen — precisely
+what the spec says not to do. This fits the "more data → faster death" pattern (idle
+10-20 min vs video 9 s-5 min) far better than any bandwidth theory.
+
+**TODO (implemented 2026-10-18):** make encoding event-driven.
+1. Only emit a frame when the captured content changes (dirty-region / frame diff), or
+   on keyframe interval.
+2. Emit periodic *idle* frames at a low cadence to satisfy decoder depth (the HUIG's
+   "enough idle frames"), rather than a fixed 30 fps stream.
+3. Keep a floor (spec: between max frame rate and **5 FPS**) so the HU decoder does not
+   power down.
+4. Measure: does time-to-disconnect scale with *frames sent* or with *wall time*? If it
+   scales with frames, an event-driven stream should survive far longer on a static
+   test pattern.
 
 ## 11. AV_MEDIA_ACK Semantics — CREDIT WINDOW, not per-frame ACK (Discovered 2026-10-14 ❓)
 
@@ -325,6 +393,58 @@ the logger does **not** decrypt (size-cap), so its contents are unknown.
   protos (e.g. `parseEnvironment`); `sensor/SensorChannel.kt` is dead code.
   `ServiceDiscoveryBuilder` hardcodes the sensor `channel_id` to 4 while runtime
   assigns 6.
+
+## 15. External research — is this a known bug? (2026-10-18)
+
+**Verdict: no public report of this failure.** Searched GitHub, GitLab,
+Stack Overflow, XDA, Reddit and Google Groups for a head unit physically
+dropping VBUS due to *phone-side* AA video data. Nothing matches.
+
+- **Every major OSS AA project is head-unit-side** (the inverse of us):
+  f1xpl/aasdk, opencardev/openauto, harryjph/android-auto-headunit,
+  andreknieriem/headunit-revived, mikereidis/headunit. Their issue trackers do
+  not contain this symptom — expected, since they do not implement the phone role.
+- **Closest adjacent:** `tomasz-grobelny/AACS` emulates the *phone* role.
+  - #12 "transfer failed: -7" — bulk-transfer failure while streaming (closest
+    public symptom; no VBUS drop).
+  - #13 — had to add PingRequest/PingResponse keepalive.
+  - #32 — real head units silently ignore a valid-but-unofficial sender even when
+    a dev HU (DHU) accepts it. Suggests HU-side verification beyond TLS.
+- **HUIG is silent** on watchdogs, VBUS, and any phone-side keepalive cadence
+  (grepped the full text).
+- **Kernel strings are generic**: `vbus:0`/`turn off gadget` are normal
+  Qualcomm `dwc3` gadget-teardown logging once the host removes VBUS — they are
+  a *symptom*, not a cause, and are not AA-specific.
+
+**Caveat:** search ran on DuckDuckGo only (other backends returned errors), so
+absence of evidence is weaker than usual. But nothing found contradicts our data.
+
+**Notably, the HUIG itself acknowledges VBUS shutdown as a known risk:** the HU
+"SHOULD equip USB current-limiting and adequate power supply to **avoid VBUS
+shutdown**". So the HU cutting VBUS under load is a recognised failure mode —
+the question remains what our stream does to provoke it.
+
+## 16. Consolidated TODO / open experiments
+
+Ordered by promise (see §9b, §10 for detail):
+
+1. **🔴 Fix resolution negotiation** (§9b) — advertise only 800×480 @ 30 fps,
+   parse the HU's prioritised `config_index`, and encode at the selected config
+   instead of the 800×480/15 default. *(implemented 2026-10-18)*
+2. **🔴 Event-driven video** (§10) — send frames only on UI change plus periodic
+   idle frames at the HU's decoder depth; honour the 5-30 fps floor. *(implemented
+   2026-10-18)*
+3. **🔴 Ack-budget instrumentation** — log cumulative frames/bytes accepted by the
+   HU vs time-to-disconnect, to test whether the HU enforces a frame/byte budget
+   (§ "more data → faster death"). *(implemented 2026-10-18)*
+4. **⏸ Send `VIDEO_FOCUS_REQUEST` (0x8007) after connect** — we never do; HUIG
+   describes MD-requested video focus. Deferred.
+5. **⏸ Log the negotiated TLS cipher suite** — rule out a cipher/size difference
+   from the official app.
+6. **⏸ Capture official-app USB traffic** (analyser/MITM) — the definitive diff.
+7. **⏸ Open all 9 advertised channels** (§8).
+8. **⏸ Test real MediaProjection** (event-driven) rather than the static test
+   pattern — the pattern produces artificially uniform traffic.
 
 ## Environment
 

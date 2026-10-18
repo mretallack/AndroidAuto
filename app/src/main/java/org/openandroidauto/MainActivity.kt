@@ -214,11 +214,14 @@ class MainActivity : AppCompatActivity() {
         swSensor.isChecked = ServiceState.sensorEnabled.value
         swFragment.isChecked = ServiceState.fragmentEnabled.value
         swTestPattern.isChecked = ServiceState.testPatternEnabled.value
+        val swEventDriven = findViewById<Switch>(R.id.swEventDriven)
+        swEventDriven.isChecked = ServiceState.eventDrivenVideo.value
 
         swAudio.setOnCheckedChangeListener { _, checked -> ServiceState.audioEnabled.value = checked; ServiceState.saveSettings() }
         swSensor.setOnCheckedChangeListener { _, checked -> ServiceState.sensorEnabled.value = checked; ServiceState.saveSettings() }
         swFragment.setOnCheckedChangeListener { _, checked -> ServiceState.fragmentEnabled.value = checked; ServiceState.saveSettings() }
         swTestPattern.setOnCheckedChangeListener { _, checked -> ServiceState.testPatternEnabled.value = checked; ServiceState.saveSettings() }
+        swEventDriven.setOnCheckedChangeListener { _, checked -> ServiceState.eventDrivenVideo.value = checked; ServiceState.saveSettings() }
 
         tvFps.text = "FPS: 15"
         tvBitrate.text = "250 Kbps"
