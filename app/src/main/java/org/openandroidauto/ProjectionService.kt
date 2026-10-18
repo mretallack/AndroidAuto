@@ -39,6 +39,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     // Per-attempt job: owns this session's read/write/ping loops so teardown can
     // cancel them before a retry (prevents a stale loop writing to a dead fd).
     private var sessionJob: Job? = null
+    // Set when a session's read loop fails; consumed by sessionWithReconnect.
+    @Volatile private var sessionEndReason: String? = null
     private val writeQueue = CoChannel<ByteArray>(capacity = 64)
     private val priorityWriteQueue = CoChannel<ByteArray>(capacity = 16)
     private var transport: Transport? = null
@@ -184,6 +186,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         var attempt = 0
         while (runScope.isActive) {
             attempt++
+            sessionEndReason = null
             logW("Session attempt #$attempt")
             // Watchdog: if this attempt never reaches ACTIVE (dead accessory still
             // listed in usbManager), cancel it so we don't sit pinging into a void.
@@ -308,7 +311,17 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     private suspend fun startSession() {
         // Fresh child scope per attempt — cancelled in teardownSession() so no
         // loop from this attempt survives into the retry.
-        val sessionScope = CoroutineScope(Dispatchers.IO + SupervisorJob(scope.coroutineContext[Job]))
+        // Safety net: any stray child-coroutine exception is logged and swallowed
+        // rather than propagating to the parent job and killing the process.
+        val sessionExceptionHandler = kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+            Log.e(TAG, "Uncaught session coroutine exception: ${e.message}", e)
+            if (sessionEndReason == null) {
+                sessionEndReason = "uncaught: ${e.message ?: e::class.java.simpleName}"
+            }
+        }
+        val sessionScope = CoroutineScope(
+            Dispatchers.IO + SupervisorJob(scope.coroutineContext[Job]) + sessionExceptionHandler
+        )
         sessionJob = sessionScope.coroutineContext[Job]
         try {
             val activeTransport: Transport = try {
@@ -374,12 +387,45 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 }
             }
 
-            sessionScope.launch { writeLoop() }
+            // A write failure (broken pipe on USB) must not crash the process
+            // either — swallow non-cancellation throwables and let the read loop
+            // detect the closed transport.
+            sessionScope.launch {
+                try {
+                    writeLoop()
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Write loop failed: ${e.message}", e)
+                }
+            }
             // Run the read loop as a child job (not inline) so the watchdog /
             // teardown can cancel the session as a unit. `readLoop` returns when
             // the transport is closed or cancelled; the caller awaits it here.
-            val reader = sessionScope.launch { readLoop(activeTransport, sessionScope) }
+            //
+            // The catch is INSIDE the launch: an IOException from a blocking USB
+            // read (e.g. EIO when the HU drops VBUS) would otherwise be an
+            // uncaught child-coroutine exception and kill the process before
+            // sessionWithReconnect could retry. We record it and let the loop end.
+            val reader = sessionScope.launch {
+                try {
+                    readLoop(activeTransport, sessionScope)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e // normal teardown, not an error
+                } catch (e: Throwable) {
+                    sessionEndReason = "read loop: ${e.message ?: e::class.java.simpleName}"
+                    Log.e(TAG, "Read loop failed: ${e.message}", e)
+                }
+            }
             reader.join()
+            // Surface the reason (if any) to sessionWithReconnect for logging.
+            sessionEndReason?.let {
+                Log.e(TAG, "Session failed: $it")
+                updateNotification("Error: $it")
+                signalDisconnected("session failed: $it")
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e // propagate cancellation (watchdog/teardown), not a failure
         } catch (e: Exception) {
             Log.e(TAG, "Session failed: ${e.message}", e)
             updateNotification("Error: ${e.message}")
