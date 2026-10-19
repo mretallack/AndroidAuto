@@ -1,6 +1,7 @@
 package org.openandroidauto.protocol
 
-import android.util.Log
+import org.openandroidauto.util.FileLogger
+
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -85,7 +86,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
 
     fun start() {
         check(state == ProtocolState.IDLE) { "Cannot start in state $state" }
-        Log.w(TAG, "Protocol started in VERSION_NEGOTIATION")
+        FileLogger.w(TAG, "Protocol started in VERSION_NEGOTIATION")
         state = ProtocolState.VERSION_NEGOTIATION
     }
 
@@ -115,7 +116,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
                     if (b and 0x80 == 0) break
                     shift += 7
                 }
-                Log.w(TAG, "PING_RESPONSE echoed=$echoed")
+                FileLogger.w(TAG, "PING_RESPONSE echoed=$echoed")
                 callback.onPingResponse(echoed)
             }
             ControlMessageType.NAVIGATION_FOCUS_REQUEST -> handleNavigationFocusRequest(payload)
@@ -125,13 +126,13 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             ControlMessageType.VOICE_SESSION_REQUEST -> handleVoiceSessionRequest(payload)
             ControlMessageType.AUDIO_FOCUS_REQUEST -> handleAudioFocusRequest(payload)
             ControlMessageType.AUDIO_FOCUS_RESPONSE -> handleAudioFocusResponse(payload)
-            else -> Log.w(TAG, "Unknown control message type: 0x${messageType.toString(16)}")
+            else -> FileLogger.w(TAG, "Unknown control message type: 0x${messageType.toString(16)}")
         }
     }
 
     fun onTlsHandshakeComplete() {
         check(state == ProtocolState.TLS_HANDSHAKE) { "TLS complete in wrong state: $state" }
-        Log.w(TAG, "TLS complete, waiting for head unit AUTH_COMPLETE")
+        FileLogger.w(TAG, "TLS complete, waiting for head unit AUTH_COMPLETE")
         state = ProtocolState.SERVICE_DISCOVERY
     }
 
@@ -165,7 +166,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         writeVarint(out, channelId.toLong())
         val payload = out.toByteArray()
         val msg = buildMessage(ControlMessageType.CHANNEL_OPEN_REQUEST, payload)
-        Log.w(TAG, "Sending CHANNEL_OPEN_REQUEST on channel $channelId")
+        FileLogger.w(TAG, "Sending CHANNEL_OPEN_REQUEST on channel $channelId")
         pendingChannelOpens.add(channelId)
         // Send on the TARGET channel with control flag
         callback.onSendFrame(channelId.toUByte(), msg, control = true)
@@ -175,7 +176,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         // AudioFocusResponse: field 1 (audio_focus_state) varint
         val payload = byteArrayOf(0x08, focusState.toByte())
         val msg = buildMessage(ControlMessageType.AUDIO_FOCUS_RESPONSE, payload)
-        Log.w(TAG, "Sending AUDIO_FOCUS_RESPONSE state=$focusState")
+        FileLogger.w(TAG, "Sending AUDIO_FOCUS_RESPONSE state=$focusState")
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = true)
     }
 
@@ -183,7 +184,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         // AudioFocusRequest: field 1 (audio_focus_type) varint
         val payload = byteArrayOf(0x08, focusType.toByte())
         val msg = buildMessage(ControlMessageType.AUDIO_FOCUS_REQUEST, payload)
-        Log.w(TAG, "Sending AUDIO_FOCUS_REQUEST type=$focusType")
+        FileLogger.w(TAG, "Sending AUDIO_FOCUS_REQUEST type=$focusType")
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
     }
 
@@ -191,7 +192,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         // NavigationFocusResponse: field 1 (type) varint
         val payload = byteArrayOf(0x08, type.toByte())
         val msg = buildMessage(ControlMessageType.NAVIGATION_FOCUS_RESPONSE, payload)
-        Log.w(TAG, "Sending NAVIGATION_FOCUS_RESPONSE type=$type")
+        FileLogger.w(TAG, "Sending NAVIGATION_FOCUS_RESPONSE type=$type")
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = true)
     }
 
@@ -219,11 +220,11 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         if (payload.size >= 4) {
             val major = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
             val minor = ((payload[2].toInt() and 0xFF) shl 8) or (payload[3].toInt() and 0xFF)
-            Log.w(TAG, "Head unit version: $major.$minor")
+            FileLogger.w(TAG, "Head unit version: $major.$minor")
         }
         sendVersionResponse()
         state = ProtocolState.TLS_HANDSHAKE
-        Log.w(TAG, "Sent VERSION_RESPONSE, moving to TLS_HANDSHAKE")
+        FileLogger.w(TAG, "Sent VERSION_RESPONSE, moving to TLS_HANDSHAKE")
     }
 
     private fun handleVersionResponse(payload: ByteArray) {
@@ -232,9 +233,9 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             val major = ((payload[0].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
             val minor = ((payload[2].toInt() and 0xFF) shl 8) or (payload[3].toInt() and 0xFF)
             val status = if (payload.size >= 6) ((payload[4].toInt() and 0xFF) shl 8) or (payload[5].toInt() and 0xFF) else 0
-            Log.w(TAG, "Head unit version: $major.$minor status=$status")
+            FileLogger.w(TAG, "Head unit version: $major.$minor status=$status")
         }
-        Log.w(TAG, "Version response received, moving to TLS_HANDSHAKE")
+        FileLogger.w(TAG, "Version response received, moving to TLS_HANDSHAKE")
         state = ProtocolState.TLS_HANDSHAKE
     }
 
@@ -253,9 +254,9 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             }
             if (field == 1) status = value.toInt()
         }
-        Log.w(TAG, "Received AUTH_COMPLETE from head unit, status=$status")
+        FileLogger.w(TAG, "Received AUTH_COMPLETE from head unit, status=$status")
         if (status != 0) {
-            Log.e(TAG, "AUTH_COMPLETE failed with status=$status")
+            FileLogger.e(TAG, "AUTH_COMPLETE failed with status=$status")
             state = ProtocolState.DISCONNECTED
             callback.onShutdown()
             return
@@ -265,9 +266,9 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
     }
 
     private fun handleServiceDiscoveryResponse(payload: ByteArray) {
-        Log.w(TAG, "Received SERVICE_DISCOVERY_RESPONSE (${payload.size} bytes)")
+        FileLogger.w(TAG, "Received SERVICE_DISCOVERY_RESPONSE (${payload.size} bytes)")
         discoveredChannels = parseServiceDiscoveryResponse(payload)
-        Log.w(TAG, "Discovered ${discoveredChannels.size} channels: ${discoveredChannels.map { it.channelId }}")
+        FileLogger.w(TAG, "Discovered ${discoveredChannels.size} channels: ${discoveredChannels.map { it.channelId }}")
         state = ProtocolState.ACTIVE
         callback.onServiceDiscoveryResponse(discoveredChannels)
         callback.onActive()
@@ -288,13 +289,13 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             }
             when (field) { 1 -> priority = value; 2 -> channelId = value }
         }
-        Log.w(TAG, "Received CHANNEL_OPEN_REQUEST ch=$channelId priority=$priority")
+        FileLogger.w(TAG, "Received CHANNEL_OPEN_REQUEST ch=$channelId priority=$priority")
         callback.onChannelOpenRequest(channelId, priority)
     }
 
     private fun handleChannelOpenResponse(payload: ByteArray) {
         val hex = payload.joinToString(" ") { String.format("%02x", it) }
-        Log.w(TAG, "CHANNEL_OPEN_RESPONSE raw: [$hex]")
+        FileLogger.w(TAG, "CHANNEL_OPEN_RESPONSE raw: [$hex]")
         var status = -1
         var i = 0
         while (i < payload.size) {
@@ -309,7 +310,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
                     if (b and 0x80 == 0) break
                     shift += 7
                 }
-                Log.w(TAG, "  field=$field value=$value")
+                FileLogger.w(TAG, "  field=$field value=$value")
                 if (field == 1) status = value
             } else if (wireType == 2) { // length-delimited
                 var len = 0; var shift = 0
@@ -320,20 +321,20 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
                     shift += 7
                 }
                 val subHex = payload.copyOfRange(i, minOf(i + len, payload.size)).joinToString(" ") { String.format("%02x", it) }
-                Log.w(TAG, "  field=$field len=$len data=[$subHex]")
+                FileLogger.w(TAG, "  field=$field len=$len data=[$subHex]")
                 i += len
             } else {
-                Log.w(TAG, "  field=$field wireType=$wireType (skipping)")
+                FileLogger.w(TAG, "  field=$field wireType=$wireType (skipping)")
                 break
             }
         }
         val channelId = pendingChannelOpens.removeFirstOrNull() ?: -1
-        Log.w(TAG, "CHANNEL_OPEN_RESPONSE for ch=$channelId status=$status")
+        FileLogger.w(TAG, "CHANNEL_OPEN_RESPONSE for ch=$channelId status=$status")
         if (status == 0) {
             openedChannels.add(channelId)
             callback.onChannelOpened(channelId)
         } else {
-            Log.w(TAG, "Channel $channelId open FAILED status=$status")
+            FileLogger.w(TAG, "Channel $channelId open FAILED status=$status")
         }
     }
 
@@ -355,7 +356,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             }
             if (field == 1) focusType = value
         }
-        Log.w(TAG, "AUDIO_FOCUS_NOTIFICATION from HU: type=$focusType")
+        FileLogger.w(TAG, "AUDIO_FOCUS_NOTIFICATION from HU: type=$focusType")
         callback.onAudioFocusRequest(focusType)
         // Do NOT send a response - HU is notifying us, not requesting
     }
@@ -375,7 +376,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             }
             if (field == 1) focusState = value
         }
-        Log.w(TAG, "AUDIO_FOCUS_RESPONSE state=$focusState")
+        FileLogger.w(TAG, "AUDIO_FOCUS_RESPONSE state=$focusState")
         callback.onAudioFocusResponse(focusState)
     }
 
@@ -394,7 +395,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             }
             if (field == 1) type = value
         }
-        Log.w(TAG, "NAVIGATION_FOCUS_REQUEST type=$type")
+        FileLogger.w(TAG, "NAVIGATION_FOCUS_REQUEST type=$type")
         callback.onNavigationFocusRequest(type)
         // Respond with type=2 (granted)
         sendNavigationFocusResponse(2)
@@ -415,7 +416,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             }
             if (field == 1) type = value
         }
-        Log.w(TAG, "VOICE_SESSION_REQUEST type=$type (1=start, 2=stop)")
+        FileLogger.w(TAG, "VOICE_SESSION_REQUEST type=$type (1=start, 2=stop)")
         callback.onVoiceSessionRequest(type)
     }
 
@@ -425,7 +426,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
     }
 
     private fun handleShutdownRequest(payload: ByteArray) {
-        Log.w(TAG, "Shutdown request received")
+        FileLogger.w(TAG, "Shutdown request received")
         val msg = buildMessage(ControlMessageType.SHUTDOWN_RESPONSE, ByteArray(0))
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = true)
         state = ProtocolState.DISCONNECTED
@@ -434,7 +435,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
 
     private fun handleServiceDiscoveryRequest(payload: ByteArray) {
         // Head unit is asking us for our channels (we're acting as server)
-        Log.w(TAG, "Received SERVICE_DISCOVERY_REQUEST")
+        FileLogger.w(TAG, "Received SERVICE_DISCOVERY_REQUEST")
         callback.onServiceDiscoveryRequest("", "")
     }
 
@@ -449,7 +450,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             .putShort(PROTOCOL_VERSION_MINOR.toShort())
             .array()
         val msg = buildMessage(ControlMessageType.VERSION_REQUEST, payload)
-        Log.w(TAG, "Sending VERSION_REQUEST v$PROTOCOL_VERSION_MAJOR.$PROTOCOL_VERSION_MINOR")
+        FileLogger.w(TAG, "Sending VERSION_REQUEST v$PROTOCOL_VERSION_MAJOR.$PROTOCOL_VERSION_MINOR")
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
     }
 
@@ -495,7 +496,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             out.write(phoneInfoBytes)
         }
         val msg = buildMessage(ControlMessageType.SERVICE_DISCOVERY_REQUEST, out.toByteArray())
-        Log.w(TAG, "Sending SERVICE_DISCOVERY_REQUEST")
+        FileLogger.w(TAG, "Sending SERVICE_DISCOVERY_REQUEST")
         callback.onSendFrame(CONTROL_CHANNEL, msg, control = false)
     }
 
@@ -504,7 +505,7 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
         val mode = if (focused) 1 else 2 // FOCUSED=1, UNFOCUSED=2
         val payload = byteArrayOf(0x08, mode.toByte(), 0x10, 0x00) // focus_mode, unrequested=false
         val msg = buildMessage(0x8008, payload) // VIDEO_FOCUS_INDICATION
-        Log.w(TAG, "Sending VIDEO_FOCUS_INDICATION ch=$channelId focused=$focused")
+        FileLogger.w(TAG, "Sending VIDEO_FOCUS_INDICATION ch=$channelId focused=$focused")
         callback.onSendFrame(channelId.toUByte(), msg, control = false)
     }
 

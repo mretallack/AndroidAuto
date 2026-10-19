@@ -1,6 +1,7 @@
 package org.openandroidauto.channel
 
-import android.util.Log
+import org.openandroidauto.util.FileLogger
+
 import org.openandroidauto.ServiceState
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -71,14 +72,14 @@ class SensorChannel(
             SensorMessageType.SENSOR_START_RESPONSE -> handleSensorStartResponse(payload)
             SensorMessageType.SENSOR_BATCH -> handleSensorBatch(payload)
             SensorMessageType.SENSOR_ERROR -> handleSensorError(payload)
-            else -> Log.w(TAG, "Unknown sensor message: 0x${messageType.toString(16)}")
+            else -> FileLogger.w(TAG, "Unknown sensor message: 0x${messageType.toString(16)}")
         }
     }
 
     /** Request all sensors the HU advertises */
     fun requestSensors(sensorTypes: List<Int>) {
         for (type in sensorTypes) {
-            Log.w(TAG, "Requesting sensor: ${SensorType.name(type)}")
+            FileLogger.w(TAG, "Requesting sensor: ${SensorType.name(type)}")
             sendSensorStartRequest(type)
         }
     }
@@ -105,7 +106,7 @@ class SensorChannel(
 
     private fun handleSensorStartRequest(payload: ByteArray) {
         val sensorType = parseVarint(payload, 1)
-        Log.w(TAG, "HU requests sensor: ${SensorType.name(sensorType)}")
+        FileLogger.w(TAG, "HU requests sensor: ${SensorType.name(sensorType)}")
         sendMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00)) // OK
         when (sensorType) {
             SensorType.NIGHT_MODE -> sendNightMode(ServiceState.sensorNightMode.value)
@@ -115,11 +116,11 @@ class SensorChannel(
 
     private fun handleSensorStartResponse(payload: ByteArray) {
         val status = if (payload.size >= 2 && payload[0].toInt() == 0x08) payload[1].toInt() and 0xFF else -1
-        Log.w(TAG, "SENSOR_START_RESPONSE status=$status (0=OK)")
+        FileLogger.w(TAG, "SENSOR_START_RESPONSE status=$status (0=OK)")
     }
 
     private fun handleSensorError(payload: ByteArray) {
-        Log.w(TAG, "SENSOR_ERROR: ${payload.joinToString(" ") { "%02x".format(it) }}")
+        FileLogger.w(TAG, "SENSOR_ERROR: ${payload.joinToString(" ") { "%02x".format(it) }}")
     }
 
     private fun handleSensorBatch(payload: ByteArray) {
@@ -171,7 +172,7 @@ class SensorChannel(
             20 -> parseGyroscope(data)
             21 -> parseGpsSatellite(data)
             22 -> parseTollCard(data)
-            else -> Log.d(TAG, "Unknown sensor field $field")
+            else -> FileLogger.d(TAG, "Unknown sensor field $field")
         }
     }
 
@@ -187,7 +188,7 @@ class SensorChannel(
         val speed = (fields[6] ?: 0).toInt() / 1000.0
         val bearing = (fields[7] ?: 0).toInt() / 1e6
         ServiceState.sensorLocation.value = ServiceState.LocationData(lat, lon, acc, alt, speed.toDouble(), bearing)
-        Log.d(TAG, "Location: $lat, $lon acc=${acc}m speed=${speed}m/s")
+        FileLogger.d(TAG, "Location: $lat, $lon acc=${acc}m speed=${speed}m/s")
     }
 
     private fun parseCompass(data: ByteArray) {
@@ -200,7 +201,7 @@ class SensorChannel(
         val fields = parseAllVarintFields(data)
         val speed = (fields[1] ?: 0) / 1000.0 // speed_e3 in m/s
         ServiceState.sensorSpeed.value = speed
-        Log.d(TAG, "Speed: ${speed * 3.6} km/h")
+        FileLogger.d(TAG, "Speed: ${speed * 3.6} km/h")
     }
 
     private fun parseRpm(data: ByteArray) {
@@ -236,14 +237,14 @@ class SensorChannel(
     }
 
     private fun parseDiagnostics(data: ByteArray) {
-        Log.d(TAG, "Diagnostics data received: ${data.size} bytes")
+        FileLogger.d(TAG, "Diagnostics data received: ${data.size} bytes")
     }
 
     private fun parseNightMode(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         val night = (fields[1] ?: 0) != 0L
         ServiceState.sensorNightMode.value = night
-        Log.w(TAG, "Night mode: $night")
+        FileLogger.w(TAG, "Night mode: $night")
     }
 
     private fun parseEnvironment(data: ByteArray) {
@@ -265,11 +266,11 @@ class SensorChannel(
         val fields = parseAllVarintFields(data)
         val status = (fields[1] ?: 0).toInt()
         ServiceState.sensorDrivingStatus.value = status
-        Log.w(TAG, "Driving status: $status (0=UNRESTRICTED)")
+        FileLogger.w(TAG, "Driving status: $status (0=UNRESTRICTED)")
     }
 
     private fun parseDeadReckoning(data: ByteArray) {
-        Log.d(TAG, "Dead reckoning data received")
+        FileLogger.d(TAG, "Dead reckoning data received")
     }
 
     private fun parsePassenger(data: ByteArray) {
@@ -278,7 +279,7 @@ class SensorChannel(
     }
 
     private fun parseDoor(data: ByteArray) {
-        Log.d(TAG, "Door data received")
+        FileLogger.d(TAG, "Door data received")
     }
 
     private fun parseLight(data: ByteArray) {
@@ -290,7 +291,7 @@ class SensorChannel(
     }
 
     private fun parseTirePressure(data: ByteArray) {
-        Log.d(TAG, "Tire pressure data received")
+        FileLogger.d(TAG, "Tire pressure data received")
     }
 
     private fun parseAccelerometer(data: ByteArray) {
@@ -318,7 +319,7 @@ class SensorChannel(
 
     private fun parseTollCard(data: ByteArray) {
         val fields = parseAllVarintFields(data)
-        Log.d(TAG, "Toll card present: ${(fields[1] ?: 0) != 0L}")
+        FileLogger.d(TAG, "Toll card present: ${(fields[1] ?: 0) != 0L}")
     }
 
     // --- Outgoing to HU (when we provide sensor data) ---

@@ -1,12 +1,13 @@
 package org.openandroidauto.channel
 
+import org.openandroidauto.util.FileLogger
+
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.projection.MediaProjection
-import android.util.Log
 import org.openandroidauto.ServiceState
 import android.view.Surface
 import java.nio.ByteBuffer
@@ -100,7 +101,7 @@ class VideoChannel(
             AVMessageType.VIDEO_FOCUS_REQUEST -> handleVideoFocusRequest(payload)
             AVMessageType.VIDEO_FOCUS_INDICATION -> handleVideoFocusIndication(payload)
             AVMessageType.AV_MEDIA_ACK -> handleMediaAck(payload)
-            else -> Log.w(TAG, "Unknown video message: 0x${messageType.toString(16)}")
+            else -> FileLogger.w(TAG, "Unknown video message: 0x${messageType.toString(16)}")
         }
     }
 
@@ -110,7 +111,7 @@ class VideoChannel(
         val payload = byteArrayOf(0x08, 0x03)
         sendMessage(AVMessageType.SETUP_REQUEST, payload)
         state = VideoState.SETUP_SENT
-        Log.w(TAG, "Sent SETUP (H264_BP), state=SETUP_SENT")
+        FileLogger.w(TAG, "Sent SETUP (H264_BP), state=SETUP_SENT")
     }
 
     /** Send START indication to begin streaming */
@@ -121,7 +122,7 @@ class VideoChannel(
         val payload = byteArrayOf(0x08, sessionId.toByte(), 0x10, selectedConfigIndex.toByte())
         sendMessage(AVMessageType.START_INDICATION, payload)
         state = VideoState.STARTED
-        Log.w(TAG, "Sent START (session=$sessionId, configIndex=$selectedConfigIndex), state=STARTED")
+        FileLogger.w(TAG, "Sent START (session=$sessionId, configIndex=$selectedConfigIndex), state=STARTED")
         startEncoding()
     }
 
@@ -173,10 +174,10 @@ class VideoChannel(
                 }
             } else break
         }
-        Log.w(TAG, "CONFIG received: status=$status max_unacked=$maxUnacked configIndex=$selectedConfigIndex")
+        FileLogger.w(TAG, "CONFIG received: status=$status max_unacked=$maxUnacked configIndex=$selectedConfigIndex")
         if (status == 2) { // STATUS_READY
             state = VideoState.CONFIGURED
-            Log.w(TAG, "Video configured, waiting for FOCUS")
+            FileLogger.w(TAG, "Video configured, waiting for FOCUS")
         }
     }
 
@@ -196,7 +197,7 @@ class VideoChannel(
             }
             if (field == 1) focusMode = value
         }
-        Log.w(TAG, "VIDEO_FOCUS_NOTIFICATION: mode=$focusMode (1=PROJECTED)")
+        FileLogger.w(TAG, "VIDEO_FOCUS_NOTIFICATION: mode=$focusMode (1=PROJECTED)")
         if (focusMode == 1 && (state == VideoState.CONFIGURED || state == VideoState.SETUP_SENT)) {
             state = VideoState.FOCUSED
             // We have focus - send START
@@ -320,9 +321,9 @@ class VideoChannel(
 
             // Output loop - reads encoded frames and sends them
             startOutputLoop()
-            Log.w(TAG, "Test pattern encoding started: ${config.width}x${config.height}@${config.fps}fps")
+            FileLogger.w(TAG, "Test pattern encoding started: ${config.width}x${config.height}@${config.fps}fps")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start test pattern: ${e.message}")
+            FileLogger.e(TAG, "Failed to start test pattern: ${e.message}")
             startBlackFrameLoop()
         }
     }
@@ -332,7 +333,7 @@ class VideoChannel(
         try {
             projection.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
-                    Log.w(TAG, "MediaProjection stopped")
+                    FileLogger.w(TAG, "MediaProjection stopped")
                     stop()
                 }
             }, null)
@@ -362,9 +363,9 @@ class VideoChannel(
 
             running = true
             startOutputLoop()
-            Log.w(TAG, "Real encoding started: ${config.width}x${config.height}@${config.fps}fps")
+            FileLogger.w(TAG, "Real encoding started: ${config.width}x${config.height}@${config.fps}fps")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start encoding: ${e.message}, falling back to test pattern")
+            FileLogger.e(TAG, "Failed to start encoding: ${e.message}, falling back to test pattern")
             startTestPatternEncoding()
         }
     }
@@ -425,7 +426,7 @@ class VideoChannel(
 
                         if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                             codecConfig = ensureAnnexB(data)
-                            Log.w(TAG, "Stored codec config: ${codecConfig!!.size} bytes")
+                            FileLogger.w(TAG, "Stored codec config: ${codecConfig!!.size} bytes")
                             codec.releaseOutputBuffer(index, false)
                             continue
                         }
@@ -445,7 +446,7 @@ class VideoChannel(
                 }
             }
             } catch (e: Exception) {
-                Log.w(TAG, "Encoder loop ended: ${e.message}")
+                FileLogger.w(TAG, "Encoder loop ended: ${e.message}")
             }
         }.apply {
             name = "AA-VideoEncoder"
@@ -523,7 +524,7 @@ class VideoChannel(
         // Flow control: wait if too many unacked frames
         synchronized(unackedLock) {
             if (unackedFrames >= maxUnacked) {
-                Log.w(TAG, "Flow control: waiting (unacked=$unackedFrames, max=$maxUnacked)")
+                FileLogger.w(TAG, "Flow control: waiting (unacked=$unackedFrames, max=$maxUnacked)")
                 ServiceState.addEvent("FLOW CTRL: blocked at $unackedFrames")
             }
             while (unackedFrames >= maxUnacked && running) {

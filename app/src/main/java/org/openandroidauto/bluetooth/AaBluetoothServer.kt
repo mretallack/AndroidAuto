@@ -1,9 +1,10 @@
 package org.openandroidauto.bluetooth
 
+import org.openandroidauto.util.FileLogger
+
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
-import android.util.Log
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -42,14 +43,14 @@ class AaBluetoothServer(
         Thread {
             try {
                 serverSocket = adapter.listenUsingRfcommWithServiceRecord(SERVICE_NAME, AA_UUID)
-                Log.i(TAG, "RFCOMM server listening")
+                FileLogger.i(TAG, "RFCOMM server listening")
 
                 while (running) {
                     val socket = serverSocket?.accept() ?: break
                     handleConnection(socket, callback)
                 }
             } catch (e: IOException) {
-                if (running) Log.e(TAG, "RFCOMM server error", e)
+                if (running) FileLogger.e(TAG, "RFCOMM server error", e)
             }
         }.apply {
             name = "AA-Bluetooth"
@@ -102,7 +103,7 @@ class AaBluetoothServer(
                 }
             }
         } catch (e: IOException) {
-            Log.d(TAG, "BT connection closed")
+            FileLogger.d(TAG, "BT connection closed")
         } finally {
             socket.close()
         }

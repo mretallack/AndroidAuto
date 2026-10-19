@@ -1,6 +1,7 @@
 package org.openandroidauto.tls
 
-import android.util.Log
+import org.openandroidauto.util.FileLogger
+
 import java.nio.ByteBuffer
 import javax.net.ssl.SSLEngine
 import javax.net.ssl.SSLEngineResult
@@ -54,7 +55,7 @@ class InBandTls(private val engine: SSLEngine) {
             netOutBuffer.clear()
             val result = engine.wrap(ByteBuffer.wrap(plaintext), netOutBuffer)
             if (result.status != SSLEngineResult.Status.OK) {
-                Log.w(TAG, "Encrypt failed: ${result.status}")
+                FileLogger.w(TAG, "Encrypt failed: ${result.status}")
                 return plaintext
             }
             netOutBuffer.flip()
@@ -74,7 +75,7 @@ class InBandTls(private val engine: SSLEngine) {
             appBuffer.clear()
             val result = engine.unwrap(ByteBuffer.wrap(ciphertext), appBuffer)
             if (result.status != SSLEngineResult.Status.OK) {
-                Log.w(TAG, "Decrypt failed: ${result.status}")
+                FileLogger.w(TAG, "Decrypt failed: ${result.status}")
                 return ciphertext
             }
             appBuffer.flip()
@@ -90,18 +91,18 @@ class InBandTls(private val engine: SSLEngine) {
         var loopCount = 0
         while (loopCount++ < 20) {
             val hs = engine.handshakeStatus
-            Log.d(TAG, "Handshake loop #$loopCount status=$hs")
+            FileLogger.d(TAG, "Handshake loop #$loopCount status=$hs")
             when (hs) {
                 SSLEngineResult.HandshakeStatus.NEED_WRAP -> {
                     netOutBuffer.clear()
                     val result = engine.wrap(ByteBuffer.allocate(0), netOutBuffer)
-                    Log.d(TAG, "wrap result: status=${result.status} hs=${result.handshakeStatus} produced=${netOutBuffer.position()}")
+                    FileLogger.d(TAG, "wrap result: status=${result.status} hs=${result.handshakeStatus} produced=${netOutBuffer.position()}")
                     netOutBuffer.flip()
                     if (netOutBuffer.hasRemaining()) {
                         val record = ByteArray(netOutBuffer.remaining())
                         netOutBuffer.get(record)
                         outgoing.add(record)
-                        Log.d(TAG, "Produced TLS record: ${record.size} bytes")
+                        FileLogger.d(TAG, "Produced TLS record: ${record.size} bytes")
                     }
                     if (result.handshakeStatus == SSLEngineResult.HandshakeStatus.FINISHED) {
                         onHandshakeFinished()
@@ -112,16 +113,16 @@ class InBandTls(private val engine: SSLEngine) {
                     netInBuffer.flip()
                     if (!netInBuffer.hasRemaining()) {
                         netInBuffer.compact()
-                        Log.d(TAG, "NEED_UNWRAP but no data, waiting")
+                        FileLogger.d(TAG, "NEED_UNWRAP but no data, waiting")
                         return outgoing // Need more data from peer
                     }
                     appBuffer.clear()
                     val result = engine.unwrap(netInBuffer, appBuffer)
-                    Log.d(TAG, "unwrap result: status=${result.status} hs=${result.handshakeStatus} consumed=${result.bytesConsumed()} produced=${result.bytesProduced()}")
+                    FileLogger.d(TAG, "unwrap result: status=${result.status} hs=${result.handshakeStatus} consumed=${result.bytesConsumed()} produced=${result.bytesProduced()}")
                     netInBuffer.compact()
 
                     if (result.status == SSLEngineResult.Status.BUFFER_UNDERFLOW) {
-                        Log.d(TAG, "BUFFER_UNDERFLOW, need more data")
+                        FileLogger.d(TAG, "BUFFER_UNDERFLOW, need more data")
                         return outgoing // Need more data
                     }
                     if (result.handshakeStatus == SSLEngineResult.HandshakeStatus.FINISHED) {
@@ -132,7 +133,7 @@ class InBandTls(private val engine: SSLEngine) {
                 SSLEngineResult.HandshakeStatus.NEED_TASK -> {
                     var task = engine.delegatedTask
                     while (task != null) { task.run(); task = engine.delegatedTask }
-                    Log.d(TAG, "Ran delegated tasks")
+                    FileLogger.d(TAG, "Ran delegated tasks")
                 }
                 SSLEngineResult.HandshakeStatus.FINISHED,
                 SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING -> {
@@ -147,6 +148,6 @@ class InBandTls(private val engine: SSLEngine) {
 
     private fun onHandshakeFinished() {
         isHandshakeComplete = true
-        Log.i(TAG, "TLS handshake finished: cipher=${engine.session.cipherSuite} protocol=${engine.session.protocol}")
+        FileLogger.i(TAG, "TLS handshake finished: cipher=${engine.session.cipherSuite} protocol=${engine.session.protocol}")
     }
 }

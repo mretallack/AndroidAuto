@@ -28,11 +28,11 @@ object FileLogger {
             // Create timestamped file
             val ts = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
             val file = File(logDir, "aa_log_$ts.txt")
-            writer = PrintWriter(FileWriter(file, false), true)
 
-            // Also write to aa_log.txt (overwrite) for easy `adb pull`
+            // Also write to aa_log.txt (overwrite) for easy `adb pull`.
+            // NOTE: previously the first PrintWriter was created then immediately
+            // replaced (leaked file handle); now we open both in one writer.
             val latest = File(baseDir, "aa_log.txt")
-            latest.writeText("") // clear
             writer = CombinedWriter(
                 PrintWriter(FileWriter(file, false), true),
                 PrintWriter(FileWriter(latest, false), true)
@@ -53,6 +53,38 @@ object FileLogger {
         val time = dateFormat.format(Date())
         (writer as? CombinedWriter)?.println("$time $tag: $msg")
             ?: writer?.println("$time $tag: $msg")
+    }
+
+    // ── Logcat-compatible helpers ──────────────────────────────────────────────
+    // Drop-in replacements for android.util.Log that ALSO write to the session
+    // file. Rationale (2026-10-19): only ProjectionService was using FileLogger, so
+    // ~83 log calls in ProtocolEngine / VideoChannel / SensorChannel / InBandTls
+    // never reached the pulled log — making protocol, TLS and video state-machine
+    // behaviour invisible when diagnosing disconnects.
+
+    fun w(tag: String, msg: String): Int {
+        log(tag, msg)
+        return Log.w(tag, msg)
+    }
+
+    fun e(tag: String, msg: String): Int {
+        log(tag, msg)
+        return Log.e(tag, msg)
+    }
+
+    fun e(tag: String, msg: String, tr: Throwable): Int {
+        log(tag, "$msg\n${Log.getStackTraceString(tr)}")
+        return Log.e(tag, msg, tr)
+    }
+
+    fun d(tag: String, msg: String): Int {
+        log(tag, msg)
+        return Log.d(tag, msg)
+    }
+
+    fun i(tag: String, msg: String): Int {
+        log(tag, msg)
+        return Log.i(tag, msg)
     }
 
     fun close() {

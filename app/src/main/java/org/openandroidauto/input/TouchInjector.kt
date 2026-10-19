@@ -2,7 +2,6 @@ package org.openandroidauto.input
 
 import android.accessibilityservice.AccessibilityService
 import android.os.SystemClock
-import android.util.Log
 import android.view.MotionEvent
 import org.openandroidauto.channel.InputEvent
 import org.openandroidauto.channel.TouchAction

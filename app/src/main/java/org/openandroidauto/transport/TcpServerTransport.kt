@@ -1,6 +1,7 @@
 package org.openandroidauto.transport
 
-import android.util.Log
+import org.openandroidauto.util.FileLogger
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -27,7 +28,7 @@ class TcpServerTransport(private val port: Int = 5277) : Transport {
     private val lock = Any()
 
     override suspend fun connect(): Unit = withContext(Dispatchers.IO) {
-        Log.w("AATcpServer", "Listening on port $port for DHU connection...")
+        FileLogger.w("AATcpServer", "Listening on port $port for DHU connection...")
         // Close any socket left over from a previous attempt so we don't leak the
         // port (previously caused EADDRINUSE on service restart / reconnect).
         try { serverSocket?.close() } catch (_: Exception) {}
@@ -56,7 +57,7 @@ class TcpServerTransport(private val port: Int = 5277) : Transport {
         // Wait briefly for initial data to arrive through ADB tunnel
         // (kotlinx delay, not Thread.sleep, so this is cancellable).
         kotlinx.coroutines.delay(500)
-        Log.w("AATcpServer", "DHU connected from ${client.remoteSocketAddress}")
+        FileLogger.w("AATcpServer", "DHU connected from ${client.remoteSocketAddress}")
     }
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
@@ -84,7 +85,7 @@ class TcpServerTransport(private val port: Int = 5277) : Transport {
             if (read > 0) {
                 buffer.put(arr, 0, read)
             } else if (read < 0) {
-                Log.w("AATcpServer", "read returned -1 (EOF)")
+                FileLogger.w("AATcpServer", "read returned -1 (EOF)")
                 isConnected = false
             }
             read

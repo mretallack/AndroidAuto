@@ -1,5 +1,7 @@
 package org.openandroidauto
 
+import org.openandroidauto.util.FileLogger
+
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -9,7 +11,6 @@ import android.hardware.usb.UsbManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import android.widget.Button
 import android.widget.Switch
 import android.widget.TextView
@@ -39,12 +40,12 @@ class MainActivity : AppCompatActivity() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 UsbManager.ACTION_USB_ACCESSORY_ATTACHED -> {
-                    Log.w(TAG, "USB accessory attached (broadcast)")
+                    FileLogger.w(TAG, "USB accessory attached (broadcast)")
                     ServiceState.addEvent("USB attached (broadcast)")
                     if (!serviceStarted) checkAutoStart()
                 }
                 UsbManager.ACTION_USB_ACCESSORY_DETACHED -> {
-                    Log.w(TAG, "USB accessory detached")
+                    FileLogger.w(TAG, "USB accessory detached")
                     ServiceState.addEvent("USB detached")
                 }
             }
@@ -72,7 +73,7 @@ class MainActivity : AppCompatActivity() {
         // Keep screen on to prevent Android from throttling USB I/O when backgrounded
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         requestBatteryOptimizationExemption()
-        Log.w(TAG, "onCreate action=${intent?.action}")
+        FileLogger.w(TAG, "onCreate action=${intent?.action}")
 
         val filter = android.content.IntentFilter().apply {
             addAction(UsbManager.ACTION_USB_ACCESSORY_ATTACHED)
@@ -104,7 +105,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleUsbIntent(intent: Intent?) {
         if (intent?.action == UsbManager.ACTION_USB_ACCESSORY_ATTACHED) {
             val accessory = intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY, UsbAccessory::class.java)
-            Log.w(TAG, "Accessory attached: ${accessory?.manufacturer}/${accessory?.model}")
+            FileLogger.w(TAG, "Accessory attached: ${accessory?.manufacturer}/${accessory?.model}")
             ServiceState.addEvent("USB: ${accessory?.manufacturer}/${accessory?.model}")
         }
 
@@ -230,7 +231,7 @@ class MainActivity : AppCompatActivity() {
     private fun startServiceWithProjection(resultCode: Int, data: Intent) {
         if (serviceStarted) return
         if (isProjectionServiceRunning()) {
-            Log.w(TAG, "ProjectionService already running — not starting a second instance")
+            FileLogger.w(TAG, "ProjectionService already running — not starting a second instance")
             serviceStarted = true
             return
         }
@@ -248,7 +249,7 @@ class MainActivity : AppCompatActivity() {
         // Guard against a race with the service's own in-place reconnect loop:
         // never launch a second instance while one is already running.
         if (isProjectionServiceRunning()) {
-            Log.w(TAG, "ProjectionService already running — not starting a second instance")
+            FileLogger.w(TAG, "ProjectionService already running — not starting a second instance")
             serviceStarted = true
             return
         }
