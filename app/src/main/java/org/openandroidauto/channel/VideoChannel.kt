@@ -88,6 +88,17 @@ class VideoChannel(
     private var unackedFrames = 0
     private val unackedLock = Object()
 
+    /**
+     * Video focus state. The HU owns the screen and tells us when it wants it back
+     * via VIDEO_FOCUS_NOTIFICATION (0x8008): FOCUSED(1) or UNFOCUSED(2). When it
+     * takes the display (e.g. the reversing camera) we MUST stop sending frames —
+     * otherwise our H.264 stream corrupts whatever the HU is showing. Symptom
+     * before this fix: digital corruption of the reversing-camera image
+     * (observed 2026-10-19, HUIG: MD yields video focus on revocation).
+     */
+    @Volatile private var videoFocusHeld = false
+    private val videoFocusLock = Object()
+
     fun setMediaProjection(projection: MediaProjection) {
         mediaProjection = projection
     }
@@ -128,6 +139,7 @@ class VideoChannel(
 
     fun stop() {
         running = false
+        synchronized(videoFocusLock) { videoFocusHeld = false }
         encoder?.stop()
         encoder?.release()
         encoder = null
@@ -197,11 +209,24 @@ class VideoChannel(
             }
             if (field == 1) focusMode = value
         }
-        FileLogger.w(TAG, "VIDEO_FOCUS_NOTIFICATION: mode=$focusMode (1=PROJECTED)")
-        if (focusMode == 1 && (state == VideoState.CONFIGURED || state == VideoState.SETUP_SENT)) {
-            state = VideoState.FOCUSED
-            // We have focus - send START
-            sendStart()
+        // VideoFocusMode: NONE=0, FOCUSED=1, UNFOCUSED=2
+        FileLogger.w(TAG, "VIDEO_FOCUS_NOTIFICATION: mode=$focusMode (1=FOCUSED, 2=UNFOCUSED)")
+        when (focusMode) {
+            1 -> { // FOCUSED — we own the screen
+                synchronized(videoFocusLock) { videoFocusHeld = true }
+                if (state == VideoState.CONFIGURED || state == VideoState.SETUP_SENT) {
+                    state = VideoState.FOCUSED
+                    sendStart()
+                } else {
+                    // Re-gained focus mid-session (e.g. reversing camera ended).
+                    // Nothing to re-send: the encoder loop resumes from the flag.
+                    FileLogger.w(TAG, "Video focus regained — resuming frame output")
+                }
+            }
+            2 -> { // UNFOCUSED — HU has taken the screen; STOP sending immediately
+                synchronized(videoFocusLock) { videoFocusHeld = false }
+                FileLogger.w(TAG, "Video focus lost — pausing frame output (HU owns the screen)")
+            }
         }
     }
 
@@ -499,6 +524,7 @@ class VideoChannel(
     fun budgetSummary(): String =
         "videoFramesSent=$framesSent videoBytesSent=$bytesSent " +
         "videoFramesAcked=$framesAcked videoBytesAcked=$bytesAcked " +
+        "focusSuppressed=$framesSuppressedForFocus focusHeld=$videoFocusHeld " +
         "unacked=$unackedFrames maxUnacked=$maxUnacked"
 
     private fun handleMediaAck(payload: ByteArray) {
@@ -517,8 +543,20 @@ class VideoChannel(
     @Volatile var bytesSent: Long = 0L; private set
     @Volatile var framesAcked: Long = 0L; private set
     @Volatile var bytesAcked: Long = 0L; private set
+    /** Frames dropped because the HU held video focus (e.g. reversing camera). */
+    @Volatile var framesSuppressedForFocus: Long = 0L; private set
+
+    /** Test seam: lets unit tests drive the focus gate directly. */
+    internal fun sendVideoFrameForTest(nalData: ByteArray, timestampUs: Long) =
+        sendVideoFrame(nalData, timestampUs)
 
     private fun sendVideoFrame(nalData: ByteArray, timestampUs: Long) {
+        // Yield the screen while the HU has taken video focus (reversing camera,
+        // native UI, etc). Sending frames then corrupts what the HU is displaying.
+        if (!videoFocusHeld) {
+            framesSuppressedForFocus++
+            return
+        }
         framesSent++
         bytesSent += nalData.size
         // Flow control: wait if too many unacked frames

@@ -31,9 +31,10 @@ This project is in early development. The protocol handshake and video projectio
 - [x] Zero-based timestamps in microseconds
 - [x] SPS/PPS prepended to keyframes (Annex B format)
 - [x] Flow control (max_unacked tracking, backpressure)
-- [x] Frame pacing (consistent 33ms intervals)
-- [x] Stable long-running video (30+ minutes confirmed)
-- [ ] Resolution negotiation from head unit's service discovery
+- [x] Event-driven frames (only on UI change + 2s idle frame, per HUIG)
+- [x] Video focus handling — pause frames when HU takes the screen (fixes reversing-camera corruption)
+- [ ] Video config negotiation — currently non-compliant; see docs §1.7
+- [ ] Stable long-running video — event-driven builds reached 15 min; needs an unattended longer run
 - [ ] Adaptive bitrate based on connection quality
 
 ### Touch Input
@@ -143,28 +144,34 @@ USB Plug-in → MainActivity → ProjectionService
 ## Known Bugs
 
 - **Channel assignment assumes order** — We assign the first `av_channel` in SERVICE_DISCOVERY_RESPONSE as video and the second as audio. This works with the car head unit (channel 1 = video) but fails with openauto (channel 4 = audio, not video). Fix: parse the `stream_type` field inside `av_channel` to distinguish `VIDEO(3)` from `AUDIO(1)`.
-- **Video stability** — **OPEN.** The AUTH_COMPLETE fix (2026-05-30) resolved the *idle* disconnect, but video streaming still causes the HU to abruptly stop all communication and then **physically drop USB power (VBUS)** after a variable 9-240s. Disconnect is inconsistent (5 KB/s fails, 170 KB/s lasts longer), so it is not bandwidth or flow control. Full evidence, ruled-out causes and open hypotheses in [`docs/connection-stability.md`](docs/connection-stability.md) (formerly `bugfix.md`).
+- **Video stability** — **IMPROVED, not yet proven fixed.** With event-driven video (2026-10-19) no HU-initiated drop has been observed; runs reached 15.3 and 12.7 min, all healthy until the cable was pulled by hand. Earlier builds dropped after 9 s-5 min and the HU physically cut USB power (VBUS). Still needs one unattended 30+ min run. Full evidence, detection method, ruled-out causes and TODO in [`docs/connection-stability.md`](docs/connection-stability.md).
+- **Reversing-camera corruption** — **FIXED 2026-10-19.** We ignored the HU's `VIDEO_FOCUS_NOTIFICATION UNFOCUSED`, so we kept streaming H.264 into the display while the HU showed the reversing camera, corrupting it. Frames are now suppressed while the HU holds focus. See docs §1.8.
+- **Video config negotiation non-compliant** — We claim a config index we don't advertise in SETUP, and put a config index where the proto expects a session id in START. Tolerated by this HU but wrong. See docs §1.7.
 - **Duplicate device listing on head unit** — The head unit's smartphone page shows our app as two separate entries (one for Android Auto, one for Bluetooth) instead of a single entry with both capabilities. This is caused by Android 12+ blocking access to the real Bluetooth MAC address (returns `02:00:00:00:00:00`). Workaround: write the real address to a config file via `adb shell "echo $(adb shell settings get secure bluetooth_address) > /sdcard/Android/data/org.openandroidauto/files/bt_address.txt"`. Need a UI settings screen to let the user enter their BT MAC manually.
 - **Voice assistant button not handled** — When the driver presses the voice/assistant button on the head unit, we receive a VOICE_SESSION_REQUEST and attempt to launch a voice assistant (Dicio or system default). However, the launched assistant doesn't receive audio from the head unit's microphone yet.
 
 ### Video Stability Test Results
 
-Test pattern (color bars) at 800x480, I-frame interval 1 second:
+> **Superseded.** The table that used to be here concluded "head unit USB receive
+> buffer overflows with sustained high throughput". That was **disproven**: 5 KB/s
+> failed while 170 KB/s lasted longer, the HU was shown to physically drop VBUS
+> (kernel `vbus:0`), and the official app runs indefinitely on the same cable.
 
-| FPS | Bitrate | Fragment | Duration | Frames | Status |
-|-----|---------|----------|----------|--------|--------|
-| 30 | 2Mbps | No | ~3s | ~90 | ❌ Too fast |
-| 15 | 2Mbps | No | ~33s | ~500 | ⚠️ Better |
-| 10 | 2Mbps | No | ~93s | ~930 | ⚠️ Good |
-| 30 | 2Mbps | Yes (2KB) | 5-25s | 150-750 | ⚠️ Variable |
-| 30 | 500Kbps | Yes (2KB) | ~54s | ~1691 | ⚠️ Better |
-| 15 | 250Kbps | Yes (2KB) | ~67s+ | 1000+ | ⚠️ Good |
-| 30 | 250Kbps | Yes (2KB), I=5s | ~20s | ~600 | ❌ Worse with long I-frame |
-| 15 | 250Kbps | No | ~13s | ~200 | ❌ Fragmentation helped here |
+Current best results (event-driven video, 2026-10-19):
 
-Root cause: Head unit USB receive buffer overflows with sustained high throughput. Lower data rate = longer connection.
+| Build | Duration | End |
+|---|---|---|
+| Constant ~15 fps (old) | 9 s - 5 min | HU dropped USB power |
+| Constant ~15 fps (old best) | 9 m 32 s | HU drop |
+| **Event-driven ~0.9 fps** | **15.3 min** | cable pulled by hand (HU healthy) |
+| **Event-driven ~0.9 fps** | **12.7 min** | cable pulled by hand (HU healthy) |
 
-**Best confirmed config:** 10fps, 2Mbps, no fragmentation = 93 seconds. Fragment-before-encrypt implementation is broken (head unit can't reassemble) — needs further investigation.
+Event-driven video cut throughput ~10× (14.8 → 0.9 fps, 5.8 → 0.5 KB/s) and no
+HU-initiated drop has been seen since. **Not yet proven** — every run so far was
+ended manually; an unattended 30+ min run is the outstanding test.
+
+Full analysis, the A-vs-B disconnect detection method, ruled-out causes and the
+TODO list are in [`docs/connection-stability.md`](docs/connection-stability.md).
 
 ## Building
 

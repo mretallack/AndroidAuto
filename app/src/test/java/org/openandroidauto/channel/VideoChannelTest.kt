@@ -128,6 +128,34 @@ class VideoChannelTest {
     }
 
     @Test
+    fun `UNFOCUSED(2) suppresses video frames until focus is regained`() {
+        // Regression: the HU takes the screen for the reversing camera and sends
+        // UNFOCUSED(2). We must stop sending frames or we corrupt its display
+        // (observed 2026-10-19). FOCUSED(1) afterwards resumes.
+        channel.sendSetup()
+        channel.onMessage(AVMessageType.SETUP_RESPONSE, byteArrayOf(0x08, 0x02, 0x10, 0x64, 0x18, 0x00))
+        channel.onMessage(AVMessageType.VIDEO_FOCUS_INDICATION, byteArrayOf(0x08, 0x01, 0x10, 0x01))
+        assertEquals(VideoState.STARTED, channel.state)
+
+        // While focused, a frame reaches the callback.
+        cb.videoFrames.clear()
+        channel.sendVideoFrameForTest(byteArrayOf(0x00, 0x00, 0x00, 0x01, 0x65), 0L)
+        assertEquals("focused frame should be sent", 1, cb.videoFrames.size)
+
+        // HU revokes focus (reversing camera) — frames must be suppressed.
+        channel.onMessage(AVMessageType.VIDEO_FOCUS_INDICATION, byteArrayOf(0x08, 0x02, 0x10, 0x00))
+        cb.videoFrames.clear()
+        channel.sendVideoFrameForTest(byteArrayOf(0x00, 0x00, 0x00, 0x01, 0x65), 1000L)
+        assertEquals("unfocused frame must NOT be sent", 0, cb.videoFrames.size)
+
+        // Focus granted again — frames flow.
+        channel.onMessage(AVMessageType.VIDEO_FOCUS_INDICATION, byteArrayOf(0x08, 0x01, 0x10, 0x00))
+        cb.videoFrames.clear() // discard anything the encoder emitted on resume
+        channel.sendVideoFrameForTest(byteArrayOf(0x00, 0x00, 0x00, 0x01, 0x65), 2000L)
+        assertEquals("refocused frame should be sent", 1, cb.videoFrames.size)
+    }
+
+    @Test
     fun `START_INDICATION format includes session and config`() {
         channel.sendSetup()
         channel.onMessage(AVMessageType.SETUP_RESPONSE, byteArrayOf(0x08, 0x02, 0x10, 0x05, 0x18, 0x00))
