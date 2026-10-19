@@ -37,15 +37,19 @@ object SensorType {
     const val GPS_SATELLITE = 21
     const val TOLL_CARD = 22
 
+    // Names matched to third_party/aasdk/aasdk_proto/SensorTypeEnum.proto.
     fun name(type: Int): String = when (type) {
-        LOCATION -> "LOCATION"; COMPASS -> "COMPASS"; SPEED -> "SPEED"
-        RPM -> "RPM"; ODOMETER -> "ODOMETER"; FUEL -> "FUEL"
+        LOCATION -> "LOCATION"; COMPASS -> "COMPASS"; SPEED -> "CAR_SPEED"
+        RPM -> "RPM"; ODOMETER -> "ODOMETER"; FUEL -> "FUEL_LEVEL"
         PARKING_BRAKE -> "PARKING_BRAKE"; GEAR -> "GEAR"; DIAGNOSTICS -> "DIAGNOSTICS"
-        NIGHT_MODE -> "NIGHT_MODE"; ENVIRONMENT -> "ENVIRONMENT"; HVAC -> "HVAC"
-        DRIVING_STATUS -> "DRIVING_STATUS"; DEAD_RECKONING -> "DEAD_RECKONING"
+        NIGHT_MODE -> "NIGHT_DATA"; ENVIRONMENT -> "ENVIRONMENT"; HVAC -> "HVAC"
+        DRIVING_STATUS -> "DRIVING_STATUS"; DEAD_RECKONING -> "DEAD_RECONING"
         PASSENGER -> "PASSENGER"; DOOR -> "DOOR"; LIGHT -> "LIGHT"
-        TIRE_PRESSURE -> "TIRE_PRESSURE"; ACCELEROMETER -> "ACCELEROMETER"
-        GYROSCOPE -> "GYROSCOPE"; GPS_SATELLITE -> "GPS_SATELLITE"; TOLL_CARD -> "TOLL_CARD"
+        // TIRE(18) and GPS(21) exist in the enum but have NO field in
+        // SensorEventIndication, so no data can ever arrive. TOLL_CARD(22) is not
+        // in the enum at all (invented here).
+        TIRE_PRESSURE -> "TIRE(no payload field)"; ACCELEROMETER -> "ACCEL"
+        GYROSCOPE -> "GYRO"; GPS_SATELLITE -> "GPS(no payload field)"; TOLL_CARD -> "TOLL_CARD(not in enum)"
         else -> "UNKNOWN($type)"
     }
 }
@@ -93,6 +97,47 @@ class SensorChannel(
         ))
     }
 
+    // ── Sensor probe (2026-10-19) ─────────────────────────────────────────────
+    // Experiment: subscribe to EVERY sensor type the protocol can carry, to learn
+    // what this HU actually exposes. MediaNav-class units are *assumed* not to
+    // bridge CAN powertrain data, but that has never been verified here — and this
+    // unit already surprised us by delivering live GPS.
+    //
+    // Valid types are 1..17, 19, 20 (SensorEventIndication has no field for
+    // TIRE=18 or GPS=21, so subscribing to those is pointless).
+    //
+    // NOTE: SensorStartResponseMessage carries only `status` (OK=0/FAIL=1) — no
+    // sensor type — so responses are correlated with requests BY ORDER.
+    private val probeTypes = listOf(
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20
+    )
+    private var probeInFlight = mutableListOf<Int>()
+    private val probeAccepted = mutableListOf<Int>()
+    private val probeRejected = mutableListOf<Int>()
+    private val probedTypesSeen = mutableSetOf<Int>()
+
+    /** Subscribe to every supported sensor type, for capability discovery. */
+    fun probeAllSensors() {
+        synchronized(probeInFlight) {
+            probeInFlight.clear(); probeAccepted.clear(); probeRejected.clear()
+            probeInFlight.addAll(probeTypes)
+        }
+        FileLogger.w(TAG, "SENSOR PROBE: subscribing to all ${probeTypes.size} types " +
+            "(${probeTypes.joinToString(",")})")
+        requestSensors(probeTypes)
+    }
+
+    /** Summary of the probe, for logging on teardown. */
+    fun probeSummary(): String {
+        val accepted = synchronized(probeInFlight) { probeAccepted.toList() }
+        val rejected = synchronized(probeInFlight) { probeRejected.toList() }
+        val seen = synchronized(probeInFlight) { probedTypesSeen.toList() }
+        fun names(xs: List<Int>) = xs.sorted().joinToString(",") { "${it}:${SensorType.name(it)}" }
+        return "probeAccepted=[${names(accepted)}] probeRejected=[${names(rejected)}] " +
+            "probeDataReceived=[${names(seen)}]" +
+            if (probeInFlight.isNotEmpty()) " probeUnanswered=${probeInFlight.size}" else ""
+    }
+
     private fun sendSensorStartRequest(sensorType: Int) {
         val out = java.io.ByteArrayOutputStream()
         out.write(0x08) // field 1 (type)
@@ -116,7 +161,16 @@ class SensorChannel(
 
     private fun handleSensorStartResponse(payload: ByteArray) {
         val status = if (payload.size >= 2 && payload[0].toInt() == 0x08) payload[1].toInt() and 0xFF else -1
-        FileLogger.w(TAG, "SENSOR_START_RESPONSE status=$status (0=OK)")
+        // Correlate with the oldest outstanding request: the response carries only
+        // a status, no sensor type.
+        val type = synchronized(probeInFlight) { probeInFlight.removeFirstOrNull() }
+        if (type != null) {
+            if (status == 0) probeAccepted.add(type) else probeRejected.add(type)
+            FileLogger.w(TAG, "SENSOR_START_RESPONSE ${SensorType.name(type)} " +
+                "status=$status (${if (status == 0) "OK" else "FAIL"})")
+        } else {
+            FileLogger.w(TAG, "SENSOR_START_RESPONSE status=$status (0=OK) [no outstanding request]")
+        }
     }
 
     private fun handleSensorError(payload: ByteArray) {
@@ -139,6 +193,9 @@ class SensorChannel(
                 }
                 if (i + len > payload.size) break
                 val data = payload.copyOfRange(i, i + len)
+                // Probe bookkeeping: which types actually deliver data (not just
+                // an OK on subscribe). Field number == SensorType value.
+                synchronized(probeInFlight) { probedTypesSeen.add(field) }
                 parseSensorData(field, data)
                 i += len
             } else if (wireType == 0) {

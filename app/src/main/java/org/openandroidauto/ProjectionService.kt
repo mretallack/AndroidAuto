@@ -299,6 +299,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         logW("TEARDOWN inbound[$inb] acksVideo[$acks]")
         // Video budget: frames/bytes the HU accepted vs. how long it lasted.
         videoChannel?.let { logW("TEARDOWN video budget: ${it.budgetSummary()}") }
+        sensorChannel?.let { logW("TEARDOWN sensor probe: ${it.probeSummary()}") }
         logW("Service destroying. Frames sent=$framesSent received=$framesReceived")
         FileLogger.close()
         scope.cancel()
@@ -828,6 +829,11 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         if (channelId == sensorChannelId) {
             // Subscribe to HU sensor data (HUIG: phone must request sensors)
             sensorChannel?.requestDefaultSensors()
+            // Optional experiment: also subscribe to every supported type, to learn
+            // what this HU actually exposes (docs §5). Off by default.
+            if (ServiceState.probeAllSensors.value) {
+                sensorChannel?.probeAllSensors()
+            }
         }
     }
 

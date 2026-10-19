@@ -264,8 +264,9 @@ Ordered by value.
 5. **🟡 Test real MediaProjection** instead of the static test pattern — event
    capture with genuine (but sparse) UI changes.
 6. **🟡 Send `VIDEO_FOCUS_REQUEST` (0x8007) after connect** — we never do.
-7. **🟡 Decode the remaining sensor batch contents.** We now log GPS; confirm what
-   else the ~1 Hz ch=6 batch carries (§5.3).
+7. **🟡 Run the sensor capability probe** (§5.4) — enable "Probe All Sensors" for
+   one session and read the accept/reject/data summary from TEARDOWN. Settles
+   what this HU actually exposes instead of assuming.
 8. **🟡 Log the negotiated TLS cipher suite** — rule out a cipher/size difference
    from the official app.
 9. **⏸ Capture official-app USB traffic** (analyser/MITM) — the definitive diff.
@@ -302,15 +303,36 @@ AASensor: Location: 50.6768736, -2.2340971 acc=0.617m speed=3.545m/s
 
 Nothing else (speed/RPM/fuel/gear/…) was ever observed from this unit.
 
-## 5.4 Protocol capability vs. reality
-The protocol supports ~21 types (speed, RPM, odometer, fuel, gear, parking brake,
-HVAC, doors, lights, accelerometer/gyro, environment…). A MediaNav-class HU
-generally does not bridge CAN powertrain data into AA, so most will likely never
-arrive regardless of subscription. Testing = subscribe and see.
+## 5.4 Protocol capability vs. reality — UNVERIFIED (corrected 2026-10-19)
 
-**Known code issues:** live `channel/SensorChannel.kt` invents a non-existent
-`TOLL_CARD=22` and `TIRE_PRESSURE`, and has field-number mismatches vs the protos
-(e.g. `parseEnvironment`); `sensor/SensorChannel.kt` is dead code.
+An earlier version of this section claimed "a MediaNav-class HU doesn't bridge CAN
+data, so most types will likely never arrive". **That was an assumption, not a
+finding** — we had only ever subscribed to 3 types, so we had no evidence about
+the other 18. Corrected.
+
+**What we actually know:** the HU sends exactly what we subscribe to and
+volunteers no extras. It supports the sensor channel and honours subscriptions.
+It also delivered live GPS, which is more than many HUs expose — so the
+"MediaNav = no CAN" rule of thumb is not safe to assume here.
+
+**Unknown:** whether SPEED/RPM/FUEL/GEAR/etc. would return data, `FAIL`, or
+silence if requested.
+
+**Experiment added** (`probeAllSensors`, UI toggle, off by default). Subscribes to
+every type that has a payload field — **1-17, 19, 20** — and logs:
+- `SENSOR_START_RESPONSE <TYPE> status=0|1` per type
+- `TEARDOWN sensor probe: probeAccepted=[…] probeRejected=[…] probeDataReceived=[…] probeUnanswered=N`
+
+Note: `SensorStartResponseMessage` carries **only `status`** (OK=0/FAIL=1), no
+sensor type — so responses are correlated with requests **by order**.
+
+Types **18 (TIRE)** and **21 (GPS)** exist in `SensorTypeEnum` but have **no field
+in `SensorEventIndication`**, so no data can ever arrive for them. `TOLL_CARD=22`
+is not in the enum at all (invented in our code). These are now labelled as such
+in `SensorType.name()`.
+
+**Known code issues:** live `channel/SensorChannel.kt` has field-number mismatches
+vs the protos (e.g. `parseEnvironment`); `sensor/SensorChannel.kt` is dead code.
 
 ---
 

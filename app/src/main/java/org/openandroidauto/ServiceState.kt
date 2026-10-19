@@ -30,6 +30,10 @@ object ServiceState {
     // when content actually changes, plus periodic idle frames to satisfy the
     // HU decoder pipeline depth. See docs/connection-stability.md §10.
     val eventDrivenVideo = MutableStateFlow(true)
+    // Experiment (docs §5): subscribe to ALL sensor types to discover what this
+    // HU actually exposes, rather than assuming most are unavailable. Off by
+    // default so normal runs stay clean.
+    val probeAllSensors = MutableStateFlow(false)
 
     // Sensor data from head unit
     data class LocationData(val lat: Double = 0.0, val lon: Double = 0.0, val accuracy: Double = 0.0,
@@ -67,6 +71,7 @@ object ServiceState {
             fragmentEnabled.value = p.getBoolean("fragment", false)
             testPatternEnabled.value = p.getBoolean("testPattern", true)
             eventDrivenVideo.value = p.getBoolean("eventDrivenVideo", true)
+            probeAllSensors.value = p.getBoolean("probeAllSensors", false)
         }
     }
 
@@ -77,6 +82,7 @@ object ServiceState {
             ?.putBoolean("fragment", fragmentEnabled.value)
             ?.putBoolean("testPattern", testPatternEnabled.value)
             ?.putBoolean("eventDrivenVideo", eventDrivenVideo.value)
+            ?.putBoolean("probeAllSensors", probeAllSensors.value)
             ?.apply()
     }
 
