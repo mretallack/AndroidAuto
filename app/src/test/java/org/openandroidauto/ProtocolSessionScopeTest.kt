@@ -7,7 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.*
 import org.junit.Test
@@ -23,11 +23,15 @@ import java.util.concurrent.atomic.AtomicReference
  * catch, that exception was an *uncaught child-coroutine* failure: it propagated
  * to the parent job and killed the process before sessionWithReconnect could
  * retry. These tests pin the containment behaviour we now rely on.
+ *
+ * NOTE: these use runBlocking (real time), not runTest — the subjects use
+ * Dispatchers.IO and real threads, so virtual time + tiny real timeouts were
+ * racy. Generous real timeouts keep them deterministic.
  */
 class ProtocolSessionScopeTest {
 
     @Test
-    fun `child failure caught locally does not escape the scope`() = runTest {
+    fun `child failure caught locally does not escape the scope`() = runBlocking {
         val captured = AtomicReference<Throwable?>(null)
         val reason = AtomicReference<String?>(null)
         val handler = CoroutineExceptionHandler { _, e -> captured.set(e) }
@@ -42,7 +46,7 @@ class ProtocolSessionScopeTest {
                 reason.set(e.message)
             }
         }
-        val joined = withTimeoutOrNull(2000) { job.join() }
+        val joined = withTimeoutOrNull(5000) { job.join() }
 
         assertNotNull("child should complete, not hang", joined)
         assertNull("exception must NOT reach the scope handler", captured.get())
@@ -51,7 +55,7 @@ class ProtocolSessionScopeTest {
     }
 
     @Test
-    fun `uncaught child failure is contained by the exception handler`() = runTest {
+    fun `uncaught child failure is contained by the exception handler`() = runBlocking {
         // Belt-and-braces: even with no local catch, the handler must absorb it so
         // the process survives (SupervisorJob keeps siblings running).
         val captured = AtomicReference<Throwable?>(null)
@@ -63,11 +67,11 @@ class ProtocolSessionScopeTest {
         val failing = scope.launch { throw IOException("boom") }
         val sibling = scope.launch { delay(50); siblingRan.set(true) }
 
-        withTimeoutOrNull(2000) { failing.join() }
-        withTimeoutOrNull(2000) { sibling.join() }
-        // The handler fires from the failing coroutine's thread; poll briefly so
-        // the assertion is not racy against that dispatch.
-        val deadline = System.currentTimeMillis() + 2000
+        withTimeoutOrNull(5000) { failing.join() }
+        withTimeoutOrNull(5000) { sibling.join() }
+        // The handler fires from the failing coroutine's thread; poll so the
+        // assertion is not racy against that dispatch.
+        val deadline = System.currentTimeMillis() + 5000
         while (captured.get() == null && System.currentTimeMillis() < deadline) delay(10)
 
         assertNotNull("handler should have received the failure", captured.get())

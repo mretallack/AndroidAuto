@@ -329,6 +329,11 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             val activeTransport: Transport = try {
                 logW("Looking for USB accessory...")
                 val usbTransport = UsbAoaTransport(this)
+                // Assign BEFORE connect(): connect() can block (accept/read), and the
+                // watchdog needs a non-null `transport` to close it and unblock. If we
+                // assign afterwards the watchdog's disconnect is a no-op and connect()
+                // can block for minutes (12 min observed 2026-10-19).
+                transport = usbTransport
                 logW("Connecting to USB accessory...")
                 usbTransport.connect()
                 logW("USB connected successfully")
@@ -340,6 +345,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 try {
                     logW("No USB, trying TCP client to localhost:5000 (openauto)...")
                     val tcpClient = TcpTransport("127.0.0.1", 5000)
+                    transport = tcpClient // assign before connect() — see above
                     tcpClient.connect()
                     logW("Connected to openauto via TCP")
                     ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTING
@@ -348,6 +354,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 } catch (e2: Exception) {
                     logW("No openauto, starting TCP server on port 5277 for DHU...")
                     val tcpTransport = org.openandroidauto.transport.TcpServerTransport(5277)
+                    transport = tcpTransport // assign before connect() — see above
                     tcpTransport.connect()
                     logW("DHU connected via TCP")
                     tcpTransport
@@ -429,7 +436,15 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // propagate cancellation (watchdog/teardown), not a failure
         } catch (e: Exception) {
+            // connect() may have failed after assigning `transport`; drop the stale
+            // reference so the next attempt/teardown starts clean.
+            val stale = transport
+            transport = null
+            if (stale != null) {
+                try { withTimeoutOrNull(1000) { stale.disconnect() } } catch (_: Exception) {}
+            }
             Log.e(TAG, "Session failed: ${e.message}", e)
+            FileLogger.log(TAG, "Session failed: ${e.message}")
             updateNotification("Error: ${e.message}")
             signalDisconnected("session failed: ${e.message}")
             // Return to sessionWithReconnect, which decides whether to retry.
