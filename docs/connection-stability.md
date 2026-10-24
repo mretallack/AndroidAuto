@@ -4,6 +4,10 @@ Findings from building and debugging an open-source **phone-side** Android Auto
 implementation (`org.openandroidauto`, replacing Google's `gearhead` APK) against
 a real head unit.
 
+> **See also:** [`protocol.md`](protocol.md) for the AAP reference (framing, TLS,
+> channels, message catalogue, known traps) and [`research.md`](research.md) for
+> the ecosystem survey. This document is about *reliability*.
+
 **Environment** (all timings in this doc refer to it unless stated):
 - Phone: Motorola Moto G52 (Android 14, Qualcomm `dwc3` USB)
 - Head unit: Dacia MediaNav (2019 SEAT Ateca LG unit)

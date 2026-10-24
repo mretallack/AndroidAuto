@@ -4,7 +4,18 @@ An open-source implementation of the Android Auto **phone-side** app. This app r
 
 ## ⚠️ WORK IN PROGRESS
 
-This project is in early development. The protocol handshake and video projection are working with a real head unit. The phone screen is successfully displayed on the car's head unit for several seconds before disconnecting (video stability is being improved).
+This project is in early development. The protocol handshake, video projection, touch input and vehicle-data decoding all work against a real head unit. Connection stability is much improved (runs of 15–72 minutes recorded) but not yet proven — the head unit has been observed cutting USB power (VBUS) mid-session. See the docs below.
+
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [`docs/protocol.md`](docs/protocol.md) | **AAP reference for this implementation.** Framing, TLS, channel model, per-channel message catalogue, the sensor pub-sub model and its correlation hazard, video/focus/flow-control rules, and a summary of **known ambiguities and traps**. Start here. |
+| [`docs/connection-stability.md`](docs/connection-stability.md) | **Connection reliability.** Protocol requirements the HU enforces; the two distinct disconnect signatures (HU VBUS cut vs. cable pull) and how to tell them apart; evidence log; ruled-out causes; reconnect/restart behaviour; instrumentation and log reference; sensors & telemetry; external research; and the prioritised TODO. |
+| [`docs/research.md`](docs/research.md) | **Ecosystem survey.** History of Android Auto reverse-engineering, comparison of existing OSS projects (headunit-revived, aasdk, openauto, AACS…), head-unit-side vs phone-side, TLS/auth analysis, and APK reverse-engineering notes. |
+| [`AGENT.md`](AGENT.md) | Guidelines for AI agents / contributors working in this repo. |
+
+Keep these current — see [`AGENT.md`](AGENT.md).
 
 ## Features
 
