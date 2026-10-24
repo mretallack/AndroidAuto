@@ -4,6 +4,8 @@ import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
+import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -16,6 +18,7 @@ class AudioOutputChannel(
     private val callback: VideoChannelCallback // reuse same callback interface
 ) {
     companion object {
+        private const val TAG = "AAAudioOut"
         const val SAMPLE_RATE = 48000
         const val CHANNEL_COUNT = 2
         const val BIT_DEPTH = 16
@@ -35,6 +38,10 @@ class AudioOutputChannel(
             AVMessageType.START_INDICATION -> handleStartIndication(payload)
             AVMessageType.STOP_INDICATION -> stop()
             AVMessageType.AV_MEDIA_ACK -> handleAck()
+            // Previously had no else: unknown messages were dropped silently, so
+            // we had no way to learn what the HU was sending on this channel.
+            else -> FileLogger.w(TAG, "UNHANDLED audio(ch$channelId) message type=0x" +
+                "${messageType.toString(16)} len=${payload.size} payload=${payload.hex(64)}")
         }
     }
 

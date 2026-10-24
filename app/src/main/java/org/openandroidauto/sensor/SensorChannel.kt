@@ -1,5 +1,8 @@
 package org.openandroidauto.sensor
 
+import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
+
 import android.app.UiModeManager
 import android.content.Context
 import android.location.Location
@@ -37,6 +40,8 @@ class SensorChannel(
     fun onMessage(messageType: Int, payload: ByteArray) {
         when (messageType) {
             SensorMessageType.SENSOR_START_REQUEST -> handleStartRequest(payload)
+            else -> FileLogger.w("AASensorProvider", "UNHANDLED message type=0x" +
+                "${messageType.toString(16)} len=${payload.size} payload=${payload.hex(64)}")
         }
     }
 

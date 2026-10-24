@@ -455,6 +455,37 @@ Several gaps meant the most useful diagnostics were missing from pulled logs:
    are process-wide, so they carried stale state across sessions (and across unit
    tests). Now reset per session via `resetLifecycleTracking()`.
 
+## 6.1c "Log what we don't understand" (2026-10-24)
+
+Requirement: if the HU sends something we do not handle, we must record **what it
+sent** — not merely that something arrived — so it can be decoded later.
+
+Audit found 5 of 8 message-dispatch sites either dropped unknown messages
+**silently** or logged the type without the payload:
+
+| Site | Before | Now |
+|---|---|---|
+| `ProtocolEngine` (control ch) | type only | type + len + payload |
+| `VideoChannel` | type only | type + len + payload |
+| `SensorChannel` (message type) | type only | type + len + payload |
+| `SensorChannel` (sensor field) | ✅ already had raw | unchanged |
+| `InputChannel` | **no `else` — silent** | type + len + payload |
+| `AudioOutputChannel` | **no `else` — silent** | type + len + payload |
+| `AudioInputChannel` | **no `else` — silent** | type + len + payload |
+| `NavigationChannel` | **body was a no-op** | type + len + payload |
+| `ProjectionService` (unrouted channel / BT) | type only | type + len + payload |
+| `sensor/SensorChannel` (dead code) | **no `else`** | type + len + payload |
+
+All unknown messages now log as `UNHANDLED <where> message type=0x… len=…
+payload=<hex>` (payload capped at 64 bytes via `ByteArray.hex(max)` in
+`util/Hex.kt`, with `…(+N more, total=M)` so large payloads don't flood the log).
+
+**Note:** `sensor/SensorChannel.kt` is dead code — not referenced anywhere. It
+implements the phone→HU *provider* role (sending location/night/driving to the
+HU), which is a different feature from the live `channel/SensorChannel.kt`. Kept
+for now with logging added, but it is a trap: two files with the same class name,
+only one wired up. Candidate for deletion.
+
 ## 6.2 Current log lines
 - `RAW ← N bytes [gap=Xms]` — inbound frame + silence gap before it.
 - `AAProtocol:` — version negotiation, `PING_RESPONSE echoed=`, state transitions.
@@ -474,6 +505,8 @@ Several gaps meant the most useful diagnostics were missing from pulled logs:
   acceptedButSilent / noData (§6.1b).
 - `FIRST DATA for <TYPE>` — first time each sensor type delivers.
 - `SENSOR_START_RESPONSE <TYPE> status=0|247` — per-type acceptance.
+- `UNHANDLED <where> message type=0x… len=… payload=<hex>` — anything we
+  don't handle, with its bytes (§6.1c).
 
 ## 6.3 Disconnect analysis recipe
 ```bash

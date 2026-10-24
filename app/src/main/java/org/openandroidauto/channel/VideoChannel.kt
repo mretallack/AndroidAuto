@@ -1,6 +1,7 @@
 package org.openandroidauto.channel
 
 import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -112,7 +113,8 @@ class VideoChannel(
             AVMessageType.VIDEO_FOCUS_REQUEST -> handleVideoFocusRequest(payload)
             AVMessageType.VIDEO_FOCUS_INDICATION -> handleVideoFocusIndication(payload)
             AVMessageType.AV_MEDIA_ACK -> handleMediaAck(payload)
-            else -> FileLogger.w(TAG, "Unknown video message: 0x${messageType.toString(16)}")
+            else -> FileLogger.w(TAG, "UNHANDLED video message type=0x${messageType.toString(16)} " +
+                "len=${payload.size} payload=${payload.hex(64)}")
         }
     }
 

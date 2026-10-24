@@ -1,6 +1,7 @@
 package org.openandroidauto.protocol
 
 import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -126,7 +127,8 @@ class ProtocolEngine(private val callback: ProtocolCallback) {
             ControlMessageType.VOICE_SESSION_REQUEST -> handleVoiceSessionRequest(payload)
             ControlMessageType.AUDIO_FOCUS_REQUEST -> handleAudioFocusRequest(payload)
             ControlMessageType.AUDIO_FOCUS_RESPONSE -> handleAudioFocusResponse(payload)
-            else -> FileLogger.w(TAG, "Unknown control message type: 0x${messageType.toString(16)}")
+            else -> FileLogger.w(TAG, "UNHANDLED control message type=0x${messageType.toString(16)} " +
+                "len=${payload.size} payload=${payload.hex()}")
         }
     }
 

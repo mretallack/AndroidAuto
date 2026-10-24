@@ -1,6 +1,7 @@
 package org.openandroidauto.channel
 
 import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 
 import org.openandroidauto.ServiceState
 import java.nio.ByteBuffer
@@ -76,7 +77,8 @@ class SensorChannel(
             SensorMessageType.SENSOR_START_RESPONSE -> handleSensorStartResponse(payload)
             SensorMessageType.SENSOR_BATCH -> handleSensorBatch(payload)
             SensorMessageType.SENSOR_ERROR -> handleSensorError(payload)
-            else -> FileLogger.w(TAG, "Unknown sensor message: 0x${messageType.toString(16)}")
+            else -> FileLogger.w(TAG, "UNHANDLED sensor message type=0x${messageType.toString(16)} " +
+                "len=${payload.size} payload=${payload.hex(64)}")
         }
     }
 

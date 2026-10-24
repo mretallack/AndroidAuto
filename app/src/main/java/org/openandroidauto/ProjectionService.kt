@@ -22,6 +22,7 @@ import org.openandroidauto.transport.TcpTransport
 import org.openandroidauto.transport.Transport
 import org.openandroidauto.transport.UsbAoaTransport
 import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 import java.nio.ByteBuffer
 
 class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, InputChannelCallback, SensorChannelCallback {
@@ -614,14 +615,18 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             }
             sensorChannelId -> sensorChannel?.onMessage(type, msgPayload)
             btChannelId -> {
-                // BluetoothPairingResponse or other BT messages from head unit
-                logW("BT channel message: type=0x${type.toString(16)} len=${msgPayload.size}")
+                // BluetoothPairingResponse or other BT messages from head unit.
+                // Include the payload: anything beyond a pairing response is
+                // currently unhandled, and we want to be able to decode it later.
+                logW("BT channel message: type=0x${type.toString(16)} len=${msgPayload.size} " +
+                    "payload=${msgPayload.hex(64)}")
             }
             else -> {
                 // Try matching by channel type if IDs not yet assigned
                 if (chId == 1) videoChannel?.onMessage(type, msgPayload)
                 else if (chId == 2) inputChannel?.onMessage(type, msgPayload)
-                else logW("Unrouted message ch=$chId type=0x${type.toString(16)}")
+                else logW("UNHANDLED channel ch=$chId type=0x${type.toString(16)} " +
+                    "len=${msgPayload.size} payload=${msgPayload.hex(64)}")
             }
         }
     }

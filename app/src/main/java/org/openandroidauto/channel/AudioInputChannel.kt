@@ -3,6 +3,8 @@ package org.openandroidauto.channel
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -15,6 +17,7 @@ class AudioInputChannel(
     private val callback: VideoChannelCallback
 ) {
     companion object {
+        private const val TAG = "AAAudioIn"
         const val SAMPLE_RATE = 16000
         const val CHANNEL_COUNT = 1
     }
@@ -28,6 +31,9 @@ class AudioInputChannel(
             AVMessageType.AV_MEDIA -> handleAudioData(payload)
             0x8005 -> handleOpenRequest(payload) // AV_INPUT_OPEN_REQUEST
             AVMessageType.STOP_INDICATION -> stop()
+            // Previously had no else: unhandled audio-input messages vanished.
+            else -> FileLogger.w(TAG, "UNHANDLED audio-in(ch$channelId) message type=0x" +
+                "${messageType.toString(16)} len=${payload.size} payload=${payload.hex(64)}")
         }
     }
 
