@@ -486,6 +486,35 @@ HU), which is a different feature from the live `channel/SensorChannel.kt`. Kept
 for now with logging added, but it is a trap: two files with the same class name,
 only one wired up. Candidate for deletion.
 
+## 6.1d Vehicle-data UI shows every field, always (2026-10-24)
+
+The panel previously rendered a field **only when it had a non-default value**, so
+the absence of a row was ambiguous — it could mean "not subscribed", "HU
+rejected", "subscribed but silent", or "value is zero". You could not tell which.
+
+Now every field is always listed, grouped, with an explicit state:
+
+```
+— Powertrain —
+Speed: 42 km/h
+RPM: not received  [subscribed, no data]
+Gear: not received  [HU rejects]
+Fuel: not received  [subscribed, no data]
+Odometer: not received  [HU rejects]
+```
+
+State suffixes: *(none)* = live, `[subscribed, no data]` = HU accepted but silent,
+`[HU rejects]` = HU refused the subscription, `not received` = no value yet.
+Suffixes only appear once the probe/`SENSOR_START_RESPONSE` data exists (otherwise
+they would all read "rejects" misleadingly before the first response).
+
+Footer summarises: `HU accepts: …` and `Accepted but silent: …`.
+
+Note some fields can **never** populate: `Sats` (type 21) and tire pressure
+(type 18) have no payload field in `SensorEventIndication`; parking brake (7),
+odometer (5), gear (8), environment (11), HVAC (12), steering (14), passenger
+(15), lights (17), accel (19) and gyro (20) are rejected by this HU.
+
 ## 6.2 Current log lines
 - `RAW ← N bytes [gap=Xms]` — inbound frame + silence gap before it.
 - `AAProtocol:` — version negotiation, `PING_RESPONSE echoed=`, state transitions.
