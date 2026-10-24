@@ -422,6 +422,39 @@ diagnoses.
 **Fix:** `FileLogger` gained `Log`-compatible `w/e/d/i` helpers writing to **both**
 logcat and the session file. All classes converted.
 
+## 6.1b Diagnostics for "what's sent vs what works" (2026-10-24)
+
+Several gaps meant the most useful diagnostics were missing from pulled logs:
+
+1. **The teardown summaries never printed.** `resetForReconnect()` nulls
+   `videoChannel`/`sensorChannel` *before* `onDestroy`, so
+   `videoChannel?.let { …budgetSummary() }` was skipped every time — confirmed
+   absent from the 72-minute log even though `onDestroy` ran. Now emitted via
+   `logSessionSummaries(where)` from **both** `resetForReconnect` and `onDestroy`.
+2. **Acceptance was only recorded for the probe.** Responses are correlated to
+   types by order via a queue that only `probeAllSensors()` filled, so an
+   ordinary run logged `[no outstanding request]` and recorded nothing. The
+   queue now tracks **all** requests.
+3. **5 parsers were still silent** (`parkingBrake`, `gear`, `environment`,
+   `accel`, `gyro`), so "no data" was indistinguishable from "no log". All now log.
+4. **No durable per-type lifecycle record.** Added `lifecycleSummary()`:
+   ```
+   SUMMARY[teardown] sensor lifecycle:
+     requested=[1:LOCATION,3:CAR_SPEED,…]
+     accepted=[1:LOCATION,2:COMPASS,3:CAR_SPEED,…]
+     deliveredData=[1:LOCATION,3:CAR_SPEED]
+     acceptedButSilent=[2:COMPASS,4:RPM,…]
+     noData=[2:COMPASS,4:RPM,…]
+   ```
+   This is the direct answer to "what did we ask for, what did the HU accept, and
+   what actually delivered data" — and `acceptedButSilent` is the interesting set.
+5. **First-data signal.** `FIRST DATA for <TYPE> (type N)` logged once per type —
+   the single clearest "it works" marker.
+6. **Unknown sensor fields** now logged at warn level with raw hex.
+7. **`ServiceState` leak between sessions.** `sensorsAccepted`/`sensorsWithData`
+   are process-wide, so they carried stale state across sessions (and across unit
+   tests). Now reset per session via `resetLifecycleTracking()`.
+
 ## 6.2 Current log lines
 - `RAW ← N bytes [gap=Xms]` — inbound frame + silence gap before it.
 - `AAProtocol:` — version negotiation, `PING_RESPONSE echoed=`, state transitions.
@@ -434,7 +467,13 @@ logcat and the session file. All classes converted.
 - `PING:` / `STALL:` — warnings when the HU goes quiet (2 s threshold; the old
   500 ms threshold false-positived against the ~790 ms idle cadence).
 - `PONG:` — ping RTT.
-- `TEARDOWN:` — final silence, backlog, ping/pong totals, last inbound, budget.
+- `TEARDOWN:` — final silence, backlog, ping/pong totals, last inbound.
+- `SUMMARY[where] video budget:` — frames/bytes sent vs acked, unacked,
+  `focusSuppressed` (§6.1b).
+- `SUMMARY[where] sensor lifecycle:` — requested / accepted / deliveredData /
+  acceptedButSilent / noData (§6.1b).
+- `FIRST DATA for <TYPE>` — first time each sensor type delivers.
+- `SENSOR_START_RESPONSE <TYPE> status=0|247` — per-type acceptance.
 
 ## 6.3 Disconnect analysis recipe
 ```bash

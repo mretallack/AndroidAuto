@@ -81,7 +81,23 @@ class SensorChannel(
     }
 
     /** Request all sensors the HU advertises */
+    /** Reset per-session lifecycle tracking (called once per session). */
+    fun resetLifecycleTracking() {
+        requestedTypes = emptySet()
+        synchronized(probeInFlight) {
+            probeInFlight.clear(); probeAccepted.clear(); probeRejected.clear(); probedTypesSeen.clear()
+        }
+        ServiceState.sensorsAccepted.value = emptySet()
+        ServiceState.sensorsWithData.value = emptySet()
+    }
+
     fun requestSensors(sensorTypes: List<Int>) {
+        requestedTypes = requestedTypes + sensorTypes
+        // Queue every request so responses can be attributed to a type. The
+        // response proto carries only a status, so we correlate by order. This
+        // must cover ordinary subscriptions too, not just the probe — otherwise
+        // a normal run records no acceptance at all.
+        synchronized(probeInFlight) { probeInFlight.addAll(sensorTypes) }
         for (type in sensorTypes) {
             FileLogger.w(TAG, "Requesting sensor: ${SensorType.name(type)}")
             sendSensorStartRequest(type)
@@ -131,13 +147,30 @@ class SensorChannel(
 
     /** Subscribe to every supported sensor type, for capability discovery. */
     fun probeAllSensors() {
-        synchronized(probeInFlight) {
-            probeInFlight.clear(); probeAccepted.clear(); probeRejected.clear()
-            probeInFlight.addAll(probeTypes)
-        }
+        // requestSensors() queues the types; just clear the per-probe tallies.
+        synchronized(probeInFlight) { probeAccepted.clear(); probeRejected.clear() }
         FileLogger.w(TAG, "SENSOR PROBE: subscribing to all ${probeTypes.size} types " +
             "(${probeTypes.joinToString(",")})")
         requestSensors(probeTypes)
+    }
+
+    /**
+     * Per-type lifecycle summary — the answer to "what did we ask for, what did
+     * the HU accept, and what actually delivered data". Tracked for ALL
+     * subscriptions (not just the probe), so a normal run reports it too.
+     */
+    @Volatile private var requestedTypes: Set<Int> = emptySet()
+
+    fun lifecycleSummary(): String {
+        val requested = requestedTypes
+        val accepted = ServiceState.sensorsAccepted.value
+        val withData = ServiceState.sensorsWithData.value
+        fun fmt(s: Set<Int>) = s.sorted().joinToString(",") { "$it:${SensorType.name(it)}" }
+        return "requested=[${fmt(requested)}] " +
+            "accepted=[${fmt(accepted)}] " +
+            "deliveredData=[${fmt(withData)}] " +
+            "acceptedButSilent=[${fmt(accepted - withData)}] " +
+            "noData=[${fmt(requested - withData)}]"
     }
 
     /** Summary of the probe, for logging on teardown. */
@@ -212,8 +245,12 @@ class SensorChannel(
                 if (i + len > payload.size) break
                 val data = payload.copyOfRange(i, i + len)
                 // Bookkeeping: which types actually deliver data (not just an OK on
-                // subscribe). Field number == SensorType value.
-                synchronized(probeInFlight) { probedTypesSeen.add(field) }
+                // subscribe). Field number == SensorType value. Log the FIRST time
+                // each type arrives — the single most useful "it works" signal.
+                val isFirst = synchronized(probeInFlight) { probedTypesSeen.add(field) }
+                if (isFirst) {
+                    FileLogger.w(TAG, "FIRST DATA for ${SensorType.name(field)} (type $field)")
+                }
                 ServiceState.sensorsWithData.value = ServiceState.sensorsWithData.value + field
                 parseSensorData(field, data)
                 i += len
@@ -248,7 +285,7 @@ class SensorChannel(
             20 -> parseGyroscope(data)
             21 -> parseGpsSatellite(data)
             22 -> parseTollCard(data)
-            else -> FileLogger.d(TAG, "Unknown sensor field $field")
+            else -> FileLogger.w(TAG, "Unknown sensor field $field (raw=${data.joinToString(" ") { "%02x".format(it) }})")
         }
     }
 
@@ -308,12 +345,14 @@ class SensorChannel(
     private fun parseParkingBrake(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         ServiceState.sensorParkingBrake.value = (fields[1] ?: 0) != 0L
+        FileLogger.d(TAG, "Parking brake: ${ServiceState.sensorParkingBrake.value}")
     }
 
     private fun parseGear(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         val gear = (fields[1] ?: 0).toInt()
         ServiceState.sensorGear.value = gear
+        FileLogger.d(TAG, "Gear: $gear")
     }
 
     private fun parseDiagnostics(data: ByteArray) {
@@ -333,6 +372,8 @@ class SensorChannel(
         ServiceState.sensorTemperature.value = (fields[1] ?: 0).toInt() / 1000.0
         ServiceState.sensorPressure.value = (fields[2] ?: 0).toInt() / 1000.0
         ServiceState.sensorRain.value = (fields[3] ?: 0).toInt()
+        FileLogger.d(TAG, "Environment: temp=%.1f°C pressure=%.1fkPa rain=%d".format(
+            ServiceState.sensorTemperature.value, ServiceState.sensorPressure.value, ServiceState.sensorRain.value))
     }
 
     private fun parseHvac(data: ByteArray) {
@@ -431,6 +472,7 @@ class SensorChannel(
         val y = (fields[2] ?: 0).toInt() / 1000.0
         val z = (fields[3] ?: 0).toInt() / 1000.0
         ServiceState.sensorAccel.value = ServiceState.Vec3(x, y, z)
+        FileLogger.d(TAG, "Accel: %.2f, %.2f, %.2f".format(x, y, z))
     }
 
     private fun parseGyroscope(data: ByteArray) {
@@ -439,6 +481,7 @@ class SensorChannel(
         val y = (fields[2] ?: 0).toInt() / 1000.0
         val z = (fields[3] ?: 0).toInt() / 1000.0
         ServiceState.sensorGyro.value = ServiceState.Vec3(x, y, z)
+        FileLogger.d(TAG, "Gyro: %.2f, %.2f, %.2f".format(x, y, z))
     }
 
     private fun parseGpsSatellite(data: ByteArray) {
@@ -446,6 +489,7 @@ class SensorChannel(
         val inUse = (fields[1] ?: 0).toInt()
         val inView = (fields[2] ?: 0).toInt()
         ServiceState.sensorGpsSats.value = ServiceState.GpsSatData(inUse, inView)
+        FileLogger.d(TAG, "GPS satellites: $inUse used / $inView in view")
     }
 
     private fun parseTollCard(data: ByteArray) {

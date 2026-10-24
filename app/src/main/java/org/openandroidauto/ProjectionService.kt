@@ -264,10 +264,27 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         }
     }
 
+    /**
+     * Emit the per-session diagnostic summaries (video budget, sensor lifecycle).
+     * Safe to call more than once per session; each call logs a `where=` marker.
+     */
+    private fun logSessionSummaries(where: String) {
+        videoChannel?.let { logW("SUMMARY[$where] video budget: ${it.budgetSummary()}") }
+        sensorChannel?.let {
+            logW("SUMMARY[$where] sensor lifecycle: ${it.lifecycleSummary()}")
+            logW("SUMMARY[$where] sensor probe: ${it.probeSummary()}")
+        }
+    }
+
     /** Tear down per-session state so a fresh attempt starts clean. */
     private suspend fun resetForReconnect() {
         protocolEngine = null
         inBandTls = null
+        // Log the per-session summaries BEFORE clearing the channel references:
+        // onDestroy reads videoChannel/sensorChannel for its TEARDOWN lines, and
+        // this runs first — so previously those lines were silently skipped
+        // (channels were already null). See docs §6.1.
+        logSessionSummaries("pre-reconnect")
         videoChannel?.stop()
         audioOutputChannel?.stop()
         audioInputChannel?.stop()
@@ -297,9 +314,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         logW("TEARDOWN lastInbound ch=$lastInboundChannel type=0x${lastInboundType.toString(16)} " +
             "framesSentAtLastInbound=$framesSentAtLastInbound")
         logW("TEARDOWN inbound[$inb] acksVideo[$acks]")
-        // Video budget: frames/bytes the HU accepted vs. how long it lasted.
-        videoChannel?.let { logW("TEARDOWN video budget: ${it.budgetSummary()}") }
-        sensorChannel?.let { logW("TEARDOWN sensor probe: ${it.probeSummary()}") }
+        // Video budget + sensor probe summary. Note these may already have been
+        // emitted by resetForReconnect() if the session ended via the reconnect
+        // path; logSessionSummaries() tolerates being called twice.
+        logSessionSummaries("teardown")
         logW("Service destroying. Frames sent=$framesSent received=$framesReceived")
         FileLogger.close()
         scope.cancel()
@@ -827,6 +845,8 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             sendBluetoothPairingRequest()
         }
         if (channelId == sensorChannelId) {
+            // Fresh lifecycle tracking for this session, then subscribe.
+            sensorChannel?.resetLifecycleTracking()
             // Subscribe to HU sensor data (HUIG: phone must request sensors)
             sensorChannel?.requestDefaultSensors()
             // Optional experiment: also subscribe to every supported type, to learn

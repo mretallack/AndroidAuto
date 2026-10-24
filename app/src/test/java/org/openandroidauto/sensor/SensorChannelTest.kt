@@ -31,6 +31,20 @@ class SensorChannelTest {
     }
 
     @Test
+    fun `lifecycle summary reports requested, accepted and delivered separately`() {
+        // The point of this summary: an "OK" on subscribe does NOT mean data
+        // arrives. It must distinguish the two.
+        channel.resetLifecycleTracking() // ServiceState is a process-wide singleton
+        channel.requestSensors(listOf(SensorType.SPEED, SensorType.RPM))
+        val summary = channel.lifecycleSummary()
+        assertTrue("should list the 2 requested types: $summary",
+            summary.contains("requested=[3:CAR_SPEED,4:RPM]"))
+        // Nothing has responded or delivered yet.
+        assertTrue("accepted should be empty: $summary", summary.contains("accepted=[]"))
+        assertTrue("delivered should be empty: $summary", summary.contains("deliveredData=[]"))
+    }
+
+    @Test
     fun `requestDefaultSensors sends SENSOR_START_REQUEST for all supported sensors`() {
         // Expanded from 3 to 8 after the 2026-10-23 probe showed this HU also
         // accepts COMPASS, CAR_SPEED, RPM, FUEL_LEVEL and DOOR.
