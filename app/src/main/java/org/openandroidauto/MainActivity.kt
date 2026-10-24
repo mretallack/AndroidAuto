@@ -189,9 +189,19 @@ class MainActivity : AppCompatActivity() {
                     else -> "  [HU rejects]"
                 }
 
+                /**
+                 * Render a row. [value] null means we have no reading for it.
+                 * Distinguish "no reading" from "reading is genuinely zero/false"
+                 * by checking whether the type is known to be delivering.
+                 */
                 fun row(label: String, type: Int, value: String?) {
-                    val v = value ?: "not received"
-                    sb.appendLine("$label: $v${status(type)}")
+                    val st = status(type)
+                    val v = when {
+                        value != null -> value
+                        type in withData -> "no reading"
+                        else -> "not received"
+                    }
+                    sb.appendLine("$label: $v$st")
                 }
 
                 sb.appendLine("— Mode & status —")
@@ -229,8 +239,9 @@ class MainActivity : AppCompatActivity() {
                     if (odo.kms > 0) "%.1f km (trip %.1f)".format(odo.kms, odo.tripKms) else null)
 
                 sb.appendLine("— Vehicle state —")
-                sb.appendLine("Parking brake: ${if (ServiceState.sensorParkingBrake.value) "ON" else "off"}" +
-                    status(SensorType.PARKING_BRAKE))
+                row("Parking brake", SensorType.PARKING_BRAKE,
+                    if (SensorType.PARKING_BRAKE in withData)
+                        (if (ServiceState.sensorParkingBrake.value) "ON" else "off") else null)
                 val doors = ServiceState.sensorDoors.value
                 val doorsOpen = buildList {
                     if (doors.hoodOpen) add("hood")
@@ -262,8 +273,9 @@ class MainActivity : AppCompatActivity() {
                 val gyro = ServiceState.sensorGyro.value
                 row("Gyro", SensorType.GYROSCOPE,
                     if (gyro.x != 0.0 || gyro.y != 0.0 || gyro.z != 0.0) "%.2f, %.2f, %.2f rad/s".format(gyro.x, gyro.y, gyro.z) else null)
-                sb.appendLine("Passenger: ${if (ServiceState.sensorPassenger.value) "present" else "none"}" +
-                    status(SensorType.PASSENGER))
+                row("Passenger", SensorType.PASSENGER,
+                    if (SensorType.PASSENGER in withData)
+                        (if (ServiceState.sensorPassenger.value) "present" else "none") else null)
 
                 // Summary of what the HU is actually giving us
                 if (probed) {

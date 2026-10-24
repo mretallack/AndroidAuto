@@ -45,11 +45,32 @@ class SensorChannelTest {
     }
 
     @Test
+    fun `lifecycle summary flags suspect correlation when responses do not match requests`() {
+        // Regression guard for the 2026-10-23 failure: 3 responses went unmatched
+        // and every per-type verdict shifted, producing a wrong capability table
+        // that then drove a wrong code change. The summary must say so.
+        channel.resetLifecycleTracking()
+        channel.requestSensors(listOf(SensorType.SPEED, SensorType.RPM))
+
+        // Drain the two real responses, then an extra one with nothing outstanding.
+        channel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+        channel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+        channel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+
+        val suspect = channel.lifecycleSummary()
+        assertTrue("unmatched responses must make correlation SUSPECT: $suspect",
+            suspect.contains("correlation=SUSPECT"))
+        assertTrue("should count the unmatched response: $suspect",
+            suspect.contains("unmatched="))
+    }
+
+    @Test
     fun `requestDefaultSensors sends SENSOR_START_REQUEST for all supported sensors`() {
-        // Expanded from 3 to 8 after the 2026-10-23 probe showed this HU also
-        // accepts COMPASS, CAR_SPEED, RPM, FUEL_LEVEL and DOOR.
+        // 7 types: the 3 protocol-required plus the 4 this HU verified as
+        // accepted AND delivering on 2026-10-24 (clean 27/27 correlated run).
+        // An earlier 8-type version was based on mis-correlated 2026-10-23 data.
         channel.requestDefaultSensors()
-        assertEquals(8, cb.messages.size)
+        assertEquals(7, cb.messages.size)
         assertTrue(cb.messageTypes().all { it == SensorMessageType.SENSOR_START_REQUEST })
     }
 

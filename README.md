@@ -66,12 +66,14 @@ This project is in early development. The protocol handshake and video projectio
 - [x] Sensor capability probe — subscribe to all types and report accept/reject
 - [x] Decode driving-status bitmask (NO_VIDEO/NO_KEYBOARD/…)
 - [x] Vehicle-data UI showing all decoded values + what the HU does/doesn't provide
-- [ ] Compass heading — HU accepts the subscription; data not yet confirmed
-- [ ] RPM — HU accepts; data not yet confirmed
-- [ ] Fuel level and range — HU accepts; data not yet confirmed
-- [ ] Door state (hood, boot, individual doors) — HU accepts; data not yet confirmed
+- [x] Parking brake state — HU provides it (0 ON/off observed)
+- [x] Accelerometer (3-axis) — HU provides it (all-zero in test)
+- [x] Gyroscope (3-axis) — HU provides it (all-zero in test)
+- [ ] Compass heading — HU **rejects**
+- [ ] RPM — HU **rejects**
+- [ ] Fuel level and range — HU **rejects**
+- [ ] Door state (hood, boot, individual doors) — HU **rejects**
 - [ ] Odometer (total + trip mileage) — HU **rejects**
-- [ ] Parking brake state — HU **rejects**
 - [ ] Gear position (P/R/N/D/1-10) — HU **rejects**
 - [ ] OBD-II diagnostics — HU **rejects**
 - [ ] Environment (temperature, pressure, rain) — HU **rejects**
@@ -79,13 +81,13 @@ This project is in early development. The protocol handshake and video projectio
 - [ ] Steering angle (type 14) — HU **rejects**
 - [ ] Passenger presence — HU **rejects**
 - [ ] Light state (headlights, indicators, hazards) — HU **rejects**
-- [ ] Accelerometer (3-axis) — HU **rejects**
-- [ ] Gyroscope (3-axis) — HU **rejects**
 - [ ] Tire pressure — no payload field in the proto (cannot arrive)
 - [ ] GPS satellite data — no payload field in the proto (cannot arrive)
 
-> "HU accepts/rejects" = the real head unit's `SENSOR_START_RESPONSE` from the
-> 2026-10-23 probe. See `docs/connection-stability.md` §5.
+> "HU accepts/rejects" = this head unit's verified `SENSOR_START_RESPONSE` from a
+> clean 2026-10-24 run (27 requests / 27 responses, zero unmatched). An earlier
+> 2026-10-23 table was invalid — responses were mis-correlated and shifted by
+> three. See `docs/connection-stability.md` §5.
 
 ### Video (additional)
 - [ ] Resolution negotiation from head unit's service discovery

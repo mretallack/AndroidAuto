@@ -86,6 +86,8 @@ class SensorChannel(
     /** Reset per-session lifecycle tracking (called once per session). */
     fun resetLifecycleTracking() {
         requestedTypes = emptySet()
+        responsesMatched = 0
+        responsesWithoutRequest = 0
         synchronized(probeInFlight) {
             probeInFlight.clear(); probeAccepted.clear(); probeRejected.clear(); probedTypesSeen.clear()
         }
@@ -115,16 +117,21 @@ class SensorChannel(
      */
     fun requestDefaultSensors() {
         requestSensors(listOf(
-            // Always required
+            // Required by the protocol
             SensorType.DRIVING_STATUS,
             SensorType.NIGHT_MODE,
             SensorType.LOCATION,
-            // Confirmed accepted (and delivering) by this HU on 2026-10-23
+            // Verified ACCEPTED **and DELIVERING** on 2026-10-24 (clean run:
+            // 27 requests / 27 responses, zero unmatched).
             SensorType.SPEED,
-            SensorType.RPM,
-            SensorType.FUEL,
-            SensorType.COMPASS,
-            SensorType.DOOR
+            SensorType.PARKING_BRAKE,
+            SensorType.ACCELEROMETER,
+            SensorType.GYROSCOPE
+            // NOT requested: COMPASS, RPM, FUEL, ODOMETER, GEAR, DIAGNOSTICS,
+            // ENVIRONMENT, HVAC, DEAD_RECKONING, PASSENGER, DOOR, LIGHT — this HU
+            // replies FAIL(247) to all of them, so subscribing is pure noise.
+            // NOTE: an earlier version requested COMPASS/RPM/FUEL/DOOR based on
+            // mis-correlated 2026-10-23 data (responses were off by three).
         ))
     }
 
@@ -162,6 +169,8 @@ class SensorChannel(
      * subscriptions (not just the probe), so a normal run reports it too.
      */
     @Volatile private var requestedTypes: Set<Int> = emptySet()
+    @Volatile private var responsesMatched = 0
+    @Volatile private var responsesWithoutRequest = 0
 
     fun lifecycleSummary(): String {
         val requested = requestedTypes
@@ -172,7 +181,8 @@ class SensorChannel(
             "accepted=[${fmt(accepted)}] " +
             "deliveredData=[${fmt(withData)}] " +
             "acceptedButSilent=[${fmt(accepted - withData)}] " +
-            "noData=[${fmt(requested - withData)}]"
+            "noData=[${fmt(requested - withData)}] " +
+            correlationReport()
     }
 
     /** Summary of the probe, for logging on teardown. */
@@ -209,9 +219,26 @@ class SensorChannel(
 
     private fun handleSensorStartResponse(payload: ByteArray) {
         val status = if (payload.size >= 2 && payload[0].toInt() == 0x08) payload[1].toInt() and 0xFF else -1
-        // Correlate with the oldest outstanding request: the response carries only
-        // a status, no sensor type.
-        val type = synchronized(probeInFlight) { probeInFlight.removeFirstOrNull() }
+
+        // Correlate with the oldest outstanding request. The response proto carries
+        // only a status (no sensor type), so ordering is the only signal available.
+        //
+        // This is fragile: if ANY response is dropped, every later attribution is
+        // silently wrong. That actually happened — the 2026-10-23 run lost 3
+        // responses and shifted every verdict by three, producing a completely
+        // wrong capability table which then drove a wrong code change.
+        //
+        // Mitigation: track counts and warn loudly on any mismatch, so a shifted
+        // run is visible rather than plausible-looking.
+        val type = synchronized(probeInFlight) {
+            if (probeInFlight.isEmpty()) {
+                responsesWithoutRequest++
+            } else {
+                responsesMatched++
+            }
+            probeInFlight.removeFirstOrNull()
+        }
+
         if (type != null) {
             if (status == 0) {
                 probeAccepted.add(type)
@@ -219,11 +246,23 @@ class SensorChannel(
             } else {
                 probeRejected.add(type)
             }
-            FileLogger.w(TAG, "SENSOR_START_RESPONSE ${SensorType.name(type)} " +
-                "status=$status (${if (status == 0) "OK" else "FAIL"})")
+            FileLogger.w(TAG, "SENSOR_START_RESPONSE #$responsesMatched " +
+                "${SensorType.name(type)} status=$status (${if (status == 0) "OK" else "FAIL"})")
         } else {
-            FileLogger.w(TAG, "SENSOR_START_RESPONSE status=$status (0=OK) [no outstanding request]")
+            FileLogger.w(TAG, "SENSOR_START_RESPONSE status=$status (0=OK) " +
+                "[UNMATCHED — no outstanding request; correlation may have shifted!]")
         }
+    }
+
+    /**
+     * Correlation health check, logged in the lifecycle summary. Any non-zero
+     * mismatch means per-type verdicts from this run cannot be trusted.
+     */
+    private fun correlationReport(): String {
+        val pending = synchronized(probeInFlight) { probeInFlight.size }
+        val ok = responsesWithoutRequest == 0 && pending == 0
+        return "correlation=${if (ok) "OK" else "SUSPECT"} " +
+            "(matched=$responsesMatched unmatched=$responsesWithoutRequest pending=$pending)"
     }
 
     private fun handleSensorError(payload: ByteArray) {

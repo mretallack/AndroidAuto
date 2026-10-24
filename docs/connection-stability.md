@@ -325,25 +325,42 @@ Subscription: `SensorStartRequestMessage { sensor_type=1, refresh_interval=2 }`.
 `FUEL_LEVEL`, `COMPASS`, `DOOR` — the extras being those this HU **accepted**
 in the 2026-10-23 probe.
 
-### 2026-10-23 probe results (this HU)
-Subscribed to all 19 types with a payload field:
+### ⚠️ The 2026-10-23 results were WRONG — corrected 2026-10-24
+An earlier version of this section listed 8 accepted / 11 rejected types. **That
+table was invalid.** `SensorStartResponseMessage` carries only a status (no
+sensor type), so responses are correlated to requests **by order** — and the
+2026-10-23 run dropped/lost 3 responses (`[no outstanding request]` x3), which
+shifted every subsequent verdict by three. Comparing request vs response order:
 
-- **Accepted (status=0):** `LOCATION`, `COMPASS`, `CAR_SPEED`, `RPM`,
-  `FUEL_LEVEL`, `NIGHT_DATA`, `DRIVING_STATUS`, `DOOR` ← **8 types**
-- **Rejected (status=247):** `ODOMETER`, `PARKING_BRAKE`, `GEAR`, `DIAGNOSTICS`,
-  `ENVIRONMENT`, `HVAC`, `DEAD_RECONING`, `PASSENGER`, `LIGHT`, `ACCEL`, `GYRO`
+```
+23rd  REQ: DRIVING_STATUS NIGHT_DATA LOCATION LOCATION COMPASS CAR_SPEED …
+      RES: LOCATION       COMPASS    CAR_SPEED RPM     ODOMETER   …    ← shifted by 3
+```
 
-Note the failure status is **247**, not the proto's `FAIL=1` — the HU uses a
-non-standard code. (Worth being tolerant of.)
+That wrong table then drove a wrong code change (COMPASS/RPM/FUEL/DOOR added to
+the default subscription). Two lessons: (a) never trust a by-order correlation
+without a health check, (b) verify counts match.
 
-**Accepted ≠ delivering.** Subscribing OK does not guarantee data arrives. As of
-2026-10-23 only `LOCATION` (~1 Hz) and `CAR_SPEED` (~1 Hz) were *observed*
-delivering; the other six logged nothing. **Caveat:** most parsers did not log
-when they ran, so absence of data could not be distinguished from absence of
-logging. All parsers now log, so the next run settles it.
+### ✅ Corrected capability table (2026-10-24, clean run)
+The 2026-10-24 run was **27 requests → 27 responses, zero unmatched**, so the
+per-type verdicts are trustworthy:
 
-Speed values look plausible (`0 km/h` stationary → `100.8 km/h` driving), so the
-`/1000` + `×3.6` scaling is right for `SpeedData.speed` (m/s ×1000).
+- **Accepted (status=0) AND delivering (7):** `LOCATION`(1), `CAR_SPEED`(3),
+  `PARKING_BRAKE`(7), `NIGHT_DATA`(10), `DRIVING_STATUS`(13), `ACCEL`(19),
+  `GYRO`(20)
+- **Rejected (status=247) (12):** `COMPASS`(2), `RPM`(4), `ODOMETER`(5),
+  `FUEL_LEVEL`(6), `GEAR`(8), `DIAGNOSTICS`(9), `ENVIRONMENT`(11), `HVAC`(12),
+  `DEAD_RECONING`(14), `PASSENGER`(15), `DOOR`(16), `LIGHT`(17)
+
+`acceptedButSilent=[]` — **every type the HU accepts actually delivers data.**
+
+Notable: **parking brake works** (this HU reports it, contrary to the bad 23rd
+table), and accel/gyro deliver (though all-zero in testing, so possibly stubs).
+
+The failure status is **247**, not the proto's `FAIL=1` — the HU uses a
+non-standard code. Be tolerant of it.
+
+`requestDefaultSensors()` now requests exactly the 7 verified types.
 
 ### Bugs found and fixed during the 2026-10-24 review
 - `parseDrivingStatus` mislabelled its value — always logged `(0=UNRESTRICTED)`
@@ -450,6 +467,13 @@ Several gaps meant the most useful diagnostics were missing from pulled logs:
    what actually delivered data" — and `acceptedButSilent` is the interesting set.
 5. **First-data signal.** `FIRST DATA for <TYPE> (type N)` logged once per type —
    the single clearest "it works" marker.
+5b. **Correlation health check.** Because responses are matched to requests by
+   order, a single dropped response silently shifts every later verdict — which
+   is exactly what produced the wrong 2026-10-23 capability table.
+   `lifecycleSummary()` now ends with
+   `correlation=OK|SUSPECT (matched=N unmatched=N pending=N)`, and each match is
+   numbered (`SENSOR_START_RESPONSE #12 …`) so a shifted run is obvious. **Treat
+   any `SUSPECT` run's per-type verdicts as invalid.**
 6. **Unknown sensor fields** now logged at warn level with raw hex.
 7. **`ServiceState` leak between sessions.** `sensorsAccepted`/`sensorsWithData`
    are process-wide, so they carried stale state across sessions (and across unit
