@@ -453,7 +453,8 @@ class ProtocolIntegrationTest {
 
         // 1. Request sensors (simulates what happens after channel opens)
         sensorChannel.requestDefaultSensors()
-        assertEquals(3, messages.size) // DRIVING_STATUS + NIGHT_MODE + LOCATION requests
+        // DRIVING_STATUS + NIGHT_MODE + LOCATION + SPEED + RPM + FUEL + COMPASS + DOOR
+        assertEquals(8, messages.size)
 
         // 2. Head unit responds with SENSOR_START_RESPONSE (OK)
         sensorChannel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))

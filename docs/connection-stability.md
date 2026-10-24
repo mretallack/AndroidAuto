@@ -187,6 +187,18 @@ alone for 30+ min is still needed (§4 item 1).
 | 2026-10-17 12:37 | **17.6 min** | old reconnect bug (HU healthy) |
 | 2026-10-19 18:xx | 7.2 / 9.3 / 6.9 min | mixed; 2 were cable pulls |
 
+### 2026-10-23 — the longest runs to date
+| Session | Duration | End | Signature |
+|---|---|---|---|
+| 13:35 | 5.4 min | cable | abrupt |
+| 13:48 | **72.0 min** | **TLS bad-record-MAC** | see §2.6 |
+| 15:00 | **45.7 min** | cable | abrupt |
+| 16:42 | 1.2 min | cable | — |
+
+Two runs of **72 and 45.7 minutes**, both far beyond anything previously
+recorded, and **no HU-initiated VBUS drop in any of them**. Ping health over the
+72-min run: `pingsSent=4289 pongsRecv=4288`.
+
 ## 2.4 Ruled out ❌
 Bandwidth · flow control / max_unacked · ping timeout · AUTH_COMPLETE/0x00FF ·
 TLS race & sequence corruption · audio focus / flow control / B-frames · codec
@@ -205,6 +217,25 @@ Android background/Doze/wake locks · phone USB driver bug.
 4. **Config negotiation non-compliance** (§1.7) tripping a decoder watchdog.
 
 ---
+
+## 2.6 New failure mode: TLS `BAD_RECORD_MAC` (2026-10-23)
+The 72-minute run ended with a **TLS error**, not a USB/VBUS event:
+
+```
+Read error: Failure in SSL library, usually a protocol error
+error:100003fc:SSLV3_ALERT_BAD_RECORD_MAC
+  (external/boringssl/src/ssl/tls_record.cc:486)
+```
+
+Immediately before it, an inbound frame arrived with TLS record type **`0x15`
+(alert)** — i.e. the HU told us the record MAC was bad. This is TLS state
+divergence between the two ends, a **different** class of failure from
+signature A (VBUS cut) and signature B (cable pull).
+
+Note §1.4 records that encrypt/decrypt are `synchronized`. The previous TLS
+concern was a *race*; this looks instead like a genuine **sequence/state
+divergence** after ~72 min and ~4300 pings / ~35k sensor batches. Unexplained —
+TODO §4 item 8.
 
 # Part 3 — Reconnect & restart behaviour
 
@@ -264,14 +295,18 @@ Ordered by value.
 5. **🟡 Test real MediaProjection** instead of the static test pattern — event
    capture with genuine (but sparse) UI changes.
 6. **🟡 Send `VIDEO_FOCUS_REQUEST` (0x8007) after connect** — we never do.
-7. **🟡 Run the sensor capability probe** (§5.4) — enable "Probe All Sensors" for
-   one session and read the accept/reject/data summary from TEARDOWN. Settles
-   what this HU actually exposes instead of assuming.
-8. **🟡 Log the negotiated TLS cipher suite** — rule out a cipher/size difference
+7. **🟡 Confirm which accepted sensors actually deliver** (§5.2) — the 2026-10-23
+   probe showed 8 accepted but only 2 observed delivering, and 6 parsers were
+   silent so we cannot tell. All parsers now log; one run settles it.
+8. **🟡 Fix the new TLS failure mode** — the 2026-10-23 72-minute run ended with
+   `SSLV3_ALERT_BAD_RECORD_MAC`, not a VBUS drop. A different bug from
+   everything previously catalogued (see §2.6).
+9. **🟡 Log the negotiated TLS cipher suite** — rule out a cipher/size difference
    from the official app.
-9. **⏸ Capture official-app USB traffic** (analyser/MITM) — the definitive diff.
-10. **⏸ Open all 9 advertised channels** (§1.11).
-11. **⏸ Sensor telemetry expansion** (§5.4).
+10. **⏸ Capture official-app USB traffic** (analyser/MITM) — the definitive diff.
+11. **⏸ Open all 9 advertised channels** (§1.11).
+12. **⏸ Expand the vehicle-data UI further** — doors/lights/HVAC/steering/accel
+    are now shown, but several depend on sensor types this HU rejects (§5.2).
 
 ---
 
@@ -285,23 +320,62 @@ Sensor channel (advertised as ch6 by this HU; `ServiceDiscoveryBuilder` hardcode
 Subscription: `SensorStartRequestMessage { sensor_type=1, refresh_interval=2 }`.
 
 ## 5.2 What we subscribe to
-Only **3 of ~21** types — `requestDefaultSensors()`: `LOCATION(1)`,
-`NIGHT_MODE(10)`, `DRIVING_STATUS(13)`.
+`requestDefaultSensors()` now asks for **8** types: the original 3
+(`LOCATION`, `NIGHT_DATA`, `DRIVING_STATUS`) plus `CAR_SPEED`, `RPM`,
+`FUEL_LEVEL`, `COMPASS`, `DOOR` — the extras being those this HU **accepted**
+in the 2026-10-23 probe.
 
-## 5.3 What this HU actually sends (confirmed 2026-10-19)
+### 2026-10-23 probe results (this HU)
+Subscribed to all 19 types with a payload field:
+
+- **Accepted (status=0):** `LOCATION`, `COMPASS`, `CAR_SPEED`, `RPM`,
+  `FUEL_LEVEL`, `NIGHT_DATA`, `DRIVING_STATUS`, `DOOR` ← **8 types**
+- **Rejected (status=247):** `ODOMETER`, `PARKING_BRAKE`, `GEAR`, `DIAGNOSTICS`,
+  `ENVIRONMENT`, `HVAC`, `DEAD_RECONING`, `PASSENGER`, `LIGHT`, `ACCEL`, `GYRO`
+
+Note the failure status is **247**, not the proto's `FAIL=1` — the HU uses a
+non-standard code. (Worth being tolerant of.)
+
+**Accepted ≠ delivering.** Subscribing OK does not guarantee data arrives. As of
+2026-10-23 only `LOCATION` (~1 Hz) and `CAR_SPEED` (~1 Hz) were *observed*
+delivering; the other six logged nothing. **Caveat:** most parsers did not log
+when they ran, so absence of data could not be distinguished from absence of
+logging. All parsers now log, so the next run settles it.
+
+Speed values look plausible (`0 km/h` stationary → `100.8 km/h` driving), so the
+`/1000` + `×3.6` scaling is right for `SpeedData.speed` (m/s ×1000).
+
+### Bugs found and fixed during the 2026-10-24 review
+- `parseDrivingStatus` mislabelled its value — always logged `(0=UNRESTRICTED)`
+  even for `9`. Now decodes the `DrivingStatusEnum` bitmask
+  (`9 → NO_VIDEO|NO_CONFIG`).
+- `parseDoor` **discarded the payload** entirely, despite the HU accepting DOOR.
+  Now parses `hood_open`, `boot_open`, `repeated door_open`.
+- `parseDeadReckoning` discarded its payload; type 14 is `SteeringWheel`
+  (angle + wheel speed), not dead reckoning. Now parsed.
+- `parseEnvironment` dropped `pressure` and `rain` (proto has 3 fields).
+- 8 parsers were **silent**, making "no data" indistinguishable from "no log".
+  All now log.
+
+## 5.3 What this HU actually sends
 | Type | Name | Observed | Content |
 |---|---|---|---|
 | 1 | `LOCATION` | ~1 Hz, continuously | lat/lon, accuracy, speed — **decoded** |
-| 10 | `NIGHT_MODE` | on change | 0/1 |
-| 13 | `DRIVING_STATUS` | at start / change | `0`=UNRESTRICTED, `9`=NO_VIDEO\|NO_CONFIG |
+| 3 | `CAR_SPEED` | ~1 Hz | m/s ×1000 — **decoded** (0 → 100.8 km/h observed) |
+| 10 | `NIGHT_DATA` | on change | 0/1 |
+| 13 | `DRIVING_STATUS` | on change | bitmask, e.g. `0`=UNRESTRICTED, `9`=NO_VIDEO\|NO_CONFIG |
 
-Example decoded line:
+Example decoded lines:
 ```
 AASensor: Location: 50.6768736, -2.2340971 acc=0.617m speed=3.545m/s
+AASensor: Speed: 34.9884 km/h
 ```
-**The phone does receive usable live GPS from this HU.**
+**The phone does get usable live GPS and vehicle speed from this HU.**
 
-Nothing else (speed/RPM/fuel/gear/…) was ever observed from this unit.
+Previously stated here (incorrectly): "nothing else was ever observed". That was
+based on the 3-type subscription, before we ever asked for speed. Also note that
+6 of the 8 accepted types had silent parsers, so their data could have been
+arriving unlogged. All parsers log now.
 
 ## 5.4 Protocol capability vs. reality — UNVERIFIED (corrected 2026-10-19)
 

@@ -31,9 +31,11 @@ class SensorChannelTest {
     }
 
     @Test
-    fun `requestDefaultSensors sends SENSOR_START_REQUEST for 3 sensors`() {
+    fun `requestDefaultSensors sends SENSOR_START_REQUEST for all supported sensors`() {
+        // Expanded from 3 to 8 after the 2026-10-23 probe showed this HU also
+        // accepts COMPASS, CAR_SPEED, RPM, FUEL_LEVEL and DOOR.
         channel.requestDefaultSensors()
-        assertEquals(3, cb.messages.size)
+        assertEquals(8, cb.messages.size)
         assertTrue(cb.messageTypes().all { it == SensorMessageType.SENSOR_START_REQUEST })
     }
 

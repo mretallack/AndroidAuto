@@ -172,23 +172,79 @@ class MainActivity : AppCompatActivity() {
             while (true) {
                 kotlinx.coroutines.delay(1000)
                 val sb = StringBuilder()
+
+                // Header: environment / mode
                 val ds = ServiceState.sensorDrivingStatus.value
-                val dsText = if (ds == 0) "UNRESTRICTED" else "RESTRICTED($ds)"
-                sb.appendLine("Mode: ${if (ServiceState.sensorNightMode.value) "NIGHT" else "DAY"}  Drive: $dsText")
+                sb.appendLine("Mode: ${if (ServiceState.sensorNightMode.value) "NIGHT" else "DAY"}   Drive: ${drivingStatusText(ds)}")
+
+                // Navigation
                 val loc = ServiceState.sensorLocation.value
                 if (loc.lat != 0.0 || loc.lon != 0.0)
-                    sb.appendLine("GPS: %.5f, %.5f  ±%.0fm".format(loc.lat, loc.lon, loc.accuracy))
+                    sb.appendLine("GPS: %.5f, %.5f  ±%.0fm  alt %.0fm  brg %.0f°".format(
+                        loc.lat, loc.lon, loc.accuracy, loc.altitude, loc.bearing))
+                val sats = ServiceState.sensorGpsSats.value
+                if (sats.inUse > 0 || sats.inView > 0)
+                    sb.appendLine("Sats: ${sats.inUse} used / ${sats.inView} in view")
+                val compass = ServiceState.sensorCompass.value
+                if (compass != 0.0) sb.appendLine("Compass: %.0f°".format(compass))
+
+                // Powertrain
                 val spd = ServiceState.sensorSpeed.value
                 if (spd > 0) sb.appendLine("Speed: %.0f km/h".format(spd * 3.6))
                 val rpm = ServiceState.sensorRpm.value
                 if (rpm > 0) sb.appendLine("RPM: %.0f".format(rpm))
                 val gear = ServiceState.sensorGear.value
-                if (gear != 0) sb.appendLine("Gear: ${when(gear) { 100->"D"; 101->"P"; 102->"R"; 0->"N"; else->"$gear" }}")
+                if (gear != 0) sb.appendLine("Gear: ${gearText(gear)}")
                 val fuel = ServiceState.sensorFuel.value
-                if (fuel.level >= 0) sb.appendLine("Fuel: ${fuel.level}%  Range: ${fuel.range}km")
-                if (ServiceState.sensorParkingBrake.value) sb.appendLine("⚠ Parking brake ON")
+                if (fuel.level >= 0) sb.appendLine("Fuel: ${fuel.level}%${if (fuel.range >= 0) "  Range: ${fuel.range} km" else ""}${if (fuel.lowFuel) "  ⚠ LOW" else ""}")
+                val odo = ServiceState.sensorOdometer.value
+                if (odo.kms > 0) sb.appendLine("Odometer: %.1f km  (trip %.1f)".format(odo.kms, odo.tripKms))
+
+                // Vehicle state
+                sb.appendLine("Parking brake: ${if (ServiceState.sensorParkingBrake.value) "ON" else "off"}" +
+                    if (!ServiceState.sensorsAccepted.value.contains(7)) "   [HU doesn't provide]" else "")
+                val doors = ServiceState.sensorDoors.value
+                if (doors.doors.isNotEmpty() || doors.hoodOpen || doors.bootOpen) {
+                    val open = buildList {
+                        if (doors.hoodOpen) add("hood")
+                        if (doors.bootOpen) add("boot")
+                        doors.doors.forEachIndexed { i, o -> if (o) add("door${i + 1}") }
+                    }
+                    sb.appendLine("Doors: ${if (open.isEmpty()) "all closed" else open.joinToString(", ") + " OPEN"}")
+                }
+                val lights = ServiceState.sensorLights.value
+                if (lights.headlight != 0 || lights.indicator != 0 || lights.hazard)
+                    sb.appendLine("Lights: ${headlightText(lights.headlight)}${if (lights.hazard) "  ⚠ HAZARD" else ""}")
+
+                // Climate / environment
                 val temp = ServiceState.sensorTemperature.value
                 if (temp != 0.0) sb.appendLine("Temp: %.1f°C".format(temp))
+                if (ServiceState.sensorPressure.value != 0.0) sb.appendLine("Pressure: %.1f kPa".format(ServiceState.sensorPressure.value))
+                val hvacT = ServiceState.sensorHvacTarget.value
+                if (hvacT != 0.0) sb.appendLine("HVAC: target %.1f°C  current %.1f°C".format(hvacT, ServiceState.sensorHvacCurrent.value))
+
+                // Motion / occupancy
+                val st = ServiceState.sensorSteeringAngle.value
+                if (st != 0.0) sb.appendLine("Steering: %.1f°".format(st))
+                val acc = ServiceState.sensorAccel.value
+                if (acc.x != 0.0 || acc.y != 0.0 || acc.z != 0.0)
+                    sb.appendLine("Accel: %.2f, %.2f, %.2f m/s²".format(acc.x, acc.y, acc.z))
+                val gyro = ServiceState.sensorGyro.value
+                if (gyro.x != 0.0 || gyro.y != 0.0 || gyro.z != 0.0)
+                    sb.appendLine("Gyro: %.2f, %.2f, %.2f rad/s".format(gyro.x, gyro.y, gyro.z))
+                if (ServiceState.sensorPassenger.value) sb.appendLine("Passenger: present")
+
+                // Capability footer: what the HU will/won't give us
+                val accepted = ServiceState.sensorsAccepted.value
+                val withData = ServiceState.sensorsWithData.value
+                if (accepted.isNotEmpty()) {
+                    sb.appendLine("—")
+                    sb.appendLine("HU provides: ${accepted.sorted().joinToString(",") { SensorNames.short(it) }}")
+                    val silent = accepted - withData
+                    if (silent.isNotEmpty())
+                        sb.appendLine("Subscribed but no data yet: ${silent.sorted().joinToString(",") { SensorNames.short(it) }}")
+                }
+
                 tvSensorData.text = if (sb.isEmpty()) "Waiting for sensor data..." else sb.toString().trim()
             }
         }
@@ -259,6 +315,47 @@ class MainActivity : AppCompatActivity() {
         serviceStarted = true
         startForegroundService(Intent(this, ProjectionService::class.java))
         findViewById<Button>(R.id.btnStartStop).text = "Stop Service"
+    }
+
+    // ── Display helpers for vehicle data ───────────────────────────────────────
+
+    /** Decode DrivingStatusEnum bitmask (mirrors SensorChannel.drivingStatusText). */
+    private fun drivingStatusText(status: Int): String {
+        if (status == 0) return "UNRESTRICTED"
+        if (status == 31) return "FULLY_RESTRICTED"
+        val parts = buildList {
+            if (status and 1 != 0) add("NO_VIDEO")
+            if (status and 2 != 0) add("NO_KEYBOARD")
+            if (status and 4 != 0) add("NO_VOICE")
+            if (status and 8 != 0) add("NO_CONFIG")
+            if (status and 16 != 0) add("LIMIT_MSG_LEN")
+        }
+        return parts.joinToString("|").ifEmpty { "UNKNOWN($status)" }
+    }
+
+    /** GearEnum: 0=NEUTRAL, 1-10 = gears, 100=DRIVE, 101=PARK, 102=REVERSE. */
+    private fun gearText(gear: Int): String = when (gear) {
+        0 -> "N"
+        100 -> "D"
+        101 -> "P"
+        102 -> "R"
+        else -> gear.toString()
+    }
+
+    /** HeadlightStatus enum: 0=NONE, 1=OFF, 2=ON, 3=HIGH. */
+    private fun headlightText(v: Int): String = when (v) {
+        0 -> "n/a"; 1 -> "off"; 2 -> "on"; 3 -> "high beam"; else -> "?"
+    }
+
+    /** Short label for a SensorType value, for the capability footer. */
+    private object SensorNames {
+        fun short(type: Int): String = when (type) {
+            1 -> "GPS"; 2 -> "compass"; 3 -> "speed"; 4 -> "rpm"; 5 -> "odometer"
+            6 -> "fuel"; 7 -> "parkbrake"; 8 -> "gear"; 9 -> "diag"; 10 -> "night"
+            11 -> "env"; 12 -> "hvac"; 13 -> "drive"; 14 -> "steering"; 15 -> "passenger"
+            16 -> "doors"; 17 -> "lights"; 19 -> "accel"; 20 -> "gyro"
+            else -> "t$type"
+        }
     }
 
     private fun isProjectionServiceRunning(): Boolean {

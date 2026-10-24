@@ -61,26 +61,31 @@ This project is in early development. The protocol handshake and video projectio
 - [x] Sensor start request/response handling
 - [x] Night mode data parsing and sending
 - [x] Driving status data parsing and sending
-- [ ] GPS location forwarding
-- [ ] Compass heading
-- [ ] Car speed
-- [ ] RPM
-- [ ] Odometer (total + trip mileage)
-- [ ] Fuel level and range
-- [ ] Parking brake state
-- [ ] Gear position (P/R/N/D/1-10)
-- [ ] OBD-II diagnostics
-- [ ] Environment (temperature, pressure, rain)
-- [ ] HVAC (target/current temperature)
-- [ ] Dead reckoning
-- [ ] Passenger presence
-- [ ] Door state (hood, boot, individual doors)
-- [ ] Light state (headlights, indicators, hazards)
-- [ ] Tire pressure
-- [ ] Accelerometer (3-axis)
-- [ ] Gyroscope (3-axis)
-- [ ] GPS satellite data
-- [ ] Respond to head unit sensor requests proactively
+- [x] GPS location (received from HU, ~1 Hz)
+- [x] Car speed (received from HU, ~1 Hz)
+- [x] Sensor capability probe — subscribe to all types and report accept/reject
+- [x] Decode driving-status bitmask (NO_VIDEO/NO_KEYBOARD/…)
+- [x] Vehicle-data UI showing all decoded values + what the HU does/doesn't provide
+- [ ] Compass heading — HU accepts the subscription; data not yet confirmed
+- [ ] RPM — HU accepts; data not yet confirmed
+- [ ] Fuel level and range — HU accepts; data not yet confirmed
+- [ ] Door state (hood, boot, individual doors) — HU accepts; data not yet confirmed
+- [ ] Odometer (total + trip mileage) — HU **rejects**
+- [ ] Parking brake state — HU **rejects**
+- [ ] Gear position (P/R/N/D/1-10) — HU **rejects**
+- [ ] OBD-II diagnostics — HU **rejects**
+- [ ] Environment (temperature, pressure, rain) — HU **rejects**
+- [ ] HVAC (target/current temperature) — HU **rejects**
+- [ ] Steering angle (type 14) — HU **rejects**
+- [ ] Passenger presence — HU **rejects**
+- [ ] Light state (headlights, indicators, hazards) — HU **rejects**
+- [ ] Accelerometer (3-axis) — HU **rejects**
+- [ ] Gyroscope (3-axis) — HU **rejects**
+- [ ] Tire pressure — no payload field in the proto (cannot arrive)
+- [ ] GPS satellite data — no payload field in the proto (cannot arrive)
+
+> "HU accepts/rejects" = the real head unit's `SENSOR_START_RESPONSE` from the
+> 2026-10-23 probe. See `docs/connection-stability.md` §5.
 
 ### Video (additional)
 - [ ] Resolution negotiation from head unit's service discovery

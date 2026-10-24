@@ -88,12 +88,25 @@ class SensorChannel(
         }
     }
 
-    /** Request the standard required sensors */
+    /**
+     * Request the sensors worth having. Originally just the 3 mandatory ones
+     * (LOCATION, NIGHT_DATA, DRIVING_STATUS). The 2026-10-23 probe showed this HU
+     * also ACCEPTS COMPASS, CAR_SPEED, RPM, FUEL_LEVEL and DOOR — and really does
+     * deliver speed — so request those too. Rejected types cost nothing (the HU
+     * replies FAIL) but there is no point asking for them every time.
+     */
     fun requestDefaultSensors() {
         requestSensors(listOf(
+            // Always required
             SensorType.DRIVING_STATUS,
             SensorType.NIGHT_MODE,
-            SensorType.LOCATION
+            SensorType.LOCATION,
+            // Confirmed accepted (and delivering) by this HU on 2026-10-23
+            SensorType.SPEED,
+            SensorType.RPM,
+            SensorType.FUEL,
+            SensorType.COMPASS,
+            SensorType.DOOR
         ))
     }
 
@@ -165,7 +178,12 @@ class SensorChannel(
         // a status, no sensor type.
         val type = synchronized(probeInFlight) { probeInFlight.removeFirstOrNull() }
         if (type != null) {
-            if (status == 0) probeAccepted.add(type) else probeRejected.add(type)
+            if (status == 0) {
+                probeAccepted.add(type)
+                ServiceState.sensorsAccepted.value = ServiceState.sensorsAccepted.value + type
+            } else {
+                probeRejected.add(type)
+            }
             FileLogger.w(TAG, "SENSOR_START_RESPONSE ${SensorType.name(type)} " +
                 "status=$status (${if (status == 0) "OK" else "FAIL"})")
         } else {
@@ -193,9 +211,10 @@ class SensorChannel(
                 }
                 if (i + len > payload.size) break
                 val data = payload.copyOfRange(i, i + len)
-                // Probe bookkeeping: which types actually deliver data (not just
-                // an OK on subscribe). Field number == SensorType value.
+                // Bookkeeping: which types actually deliver data (not just an OK on
+                // subscribe). Field number == SensorType value.
                 synchronized(probeInFlight) { probedTypesSeen.add(field) }
+                ServiceState.sensorsWithData.value = ServiceState.sensorsWithData.value + field
                 parseSensorData(field, data)
                 i += len
             } else if (wireType == 0) {
@@ -252,6 +271,7 @@ class SensorChannel(
         val fields = parseAllVarintFields(data)
         val bearing = (fields[1] ?: 0).toInt() / 1e6
         ServiceState.sensorCompass.value = bearing
+        FileLogger.d(TAG, "Compass: %.0f°".format(bearing))
     }
 
     private fun parseSpeed(data: ByteArray) {
@@ -265,6 +285,7 @@ class SensorChannel(
         val fields = parseAllVarintFields(data)
         val rpm = (fields[1] ?: 0) / 1000.0
         ServiceState.sensorRpm.value = rpm
+        FileLogger.d(TAG, "RPM: %.0f".format(rpm))
     }
 
     private fun parseOdometer(data: ByteArray) {
@@ -272,6 +293,7 @@ class SensorChannel(
         val kms = (fields[1] ?: 0) / 10.0
         val tripKms = (fields[2] ?: 0) / 10.0
         ServiceState.sensorOdometer.value = ServiceState.OdometerData(kms, tripKms)
+        FileLogger.d(TAG, "Odometer: %.1f km (trip %.1f)".format(kms, tripKms))
     }
 
     private fun parseFuel(data: ByteArray) {
@@ -280,6 +302,7 @@ class SensorChannel(
         val range = (fields[2] ?: 0).toInt() // km
         val lowFuel = (fields[3] ?: 0) != 0L
         ServiceState.sensorFuel.value = ServiceState.FuelData(level, range, lowFuel)
+        FileLogger.d(TAG, "Fuel: level=$level range=$range low=$lowFuel")
     }
 
     private fun parseParkingBrake(data: ByteArray) {
@@ -305,10 +328,11 @@ class SensorChannel(
     }
 
     private fun parseEnvironment(data: ByteArray) {
+        // Environment.proto: temperature=1, pressure=2, rain=3
         val fields = parseAllVarintFields(data)
-        val temp = (fields[1] ?: 0).toInt() / 1000.0
-        val pressure = (fields[2] ?: 0).toInt() / 1000.0
-        ServiceState.sensorTemperature.value = temp
+        ServiceState.sensorTemperature.value = (fields[1] ?: 0).toInt() / 1000.0
+        ServiceState.sensorPressure.value = (fields[2] ?: 0).toInt() / 1000.0
+        ServiceState.sensorRain.value = (fields[3] ?: 0).toInt()
     }
 
     private fun parseHvac(data: ByteArray) {
@@ -317,26 +341,75 @@ class SensorChannel(
         val current = (fields[2] ?: 0).toInt() / 1000.0
         ServiceState.sensorHvacTarget.value = target
         ServiceState.sensorHvacCurrent.value = current
+        FileLogger.d(TAG, "HVAC: target=%.1f current=%.1f".format(target, current))
     }
 
     private fun parseDrivingStatus(data: ByteArray) {
+        // DrivingStatus.proto status is a BITMASK (DrivingStatusEnum):
+        //   UNRESTRICTED=0, NO_VIDEO=1, NO_KEYBOARD=2, NO_VOICE=4, NO_CONFIG=8,
+        //   LIMIT_MSG_LEN=16, FULLY_RESTRICTED=31
         val fields = parseAllVarintFields(data)
         val status = (fields[1] ?: 0).toInt()
         ServiceState.sensorDrivingStatus.value = status
-        FileLogger.w(TAG, "Driving status: $status (0=UNRESTRICTED)")
+        FileLogger.w(TAG, "Driving status: $status (${drivingStatusText(status)})")
+    }
+
+    private fun drivingStatusText(status: Int): String {
+        if (status == 0) return "UNRESTRICTED"
+        if (status == 31) return "FULLY_RESTRICTED"
+        val parts = buildList {
+            if (status and 1 != 0) add("NO_VIDEO")
+            if (status and 2 != 0) add("NO_KEYBOARD")
+            if (status and 4 != 0) add("NO_VOICE")
+            if (status and 8 != 0) add("NO_CONFIG")
+            if (status and 16 != 0) add("LIMIT_MSG_LEN")
+        }
+        return parts.joinToString("|").ifEmpty { "UNKNOWN($status)" }
     }
 
     private fun parseDeadReckoning(data: ByteArray) {
-        FileLogger.d(TAG, "Dead reckoning data received")
+        // Type 14 is SteeringWheel in the proto (not "dead reckoning"):
+        // steering_angle(int32)=1, wheel_speed(int32)=2
+        val fields = parseAllVarintFields(data)
+        ServiceState.sensorSteeringAngle.value = (fields[1] ?: 0).toInt() / 1000.0
+        ServiceState.sensorSteeringWheelSpeed.value = (fields[2] ?: 0).toInt() / 1000.0
+        FileLogger.d(TAG, "Steering wheel: angle=${ServiceState.sensorSteeringAngle.value} speed=${ServiceState.sensorSteeringWheelSpeed.value}")
     }
 
     private fun parsePassenger(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         ServiceState.sensorPassenger.value = (fields[1] ?: 0) != 0L
+        FileLogger.d(TAG, "Passenger present: ${ServiceState.sensorPassenger.value}")
     }
 
     private fun parseDoor(data: ByteArray) {
-        FileLogger.d(TAG, "Door data received")
+        // Door.proto: hood_open(bool)=1, boot_open(bool)=2, repeated door_open(bool)=3
+        // Previously this discarded the data ("Door data received") even though the
+        // HU accepts the DOOR subscription.
+        val doors = mutableListOf<Boolean>()
+        var hood = false; var boot = false
+        var i = 0
+        while (i < data.size) {
+            val tag = data[i].toInt() and 0xFF; i++
+            val field = tag ushr 3
+            val wt = tag and 0x07
+            if (wt == 0) {
+                var v = 0L; var s = 0
+                while (i < data.size) {
+                    val b = data[i].toInt() and 0xFF; i++
+                    v = v or ((b and 0x7F).toLong() shl s)
+                    if (b and 0x80 == 0) break
+                    s += 7
+                }
+                when (field) {
+                    1 -> hood = v != 0L
+                    2 -> boot = v != 0L
+                    3 -> doors.add(v != 0L)
+                }
+            } else break
+        }
+        ServiceState.sensorDoors.value = ServiceState.DoorData(hood, boot, doors)
+        FileLogger.w(TAG, "Doors: hood=$hood boot=$boot doors=${doors.map { if (it) "OPEN" else "closed" }}")
     }
 
     private fun parseLight(data: ByteArray) {
@@ -345,6 +418,7 @@ class SensorChannel(
         val indicator = (fields[2] ?: 0).toInt() // 1=NONE, 2=LEFT, 3=RIGHT
         val hazard = (fields[3] ?: 0) != 0L
         ServiceState.sensorLights.value = ServiceState.LightData(headlight, indicator, hazard)
+        FileLogger.d(TAG, "Lights: headlight=$headlight indicator=$indicator hazard=$hazard")
     }
 
     private fun parseTirePressure(data: ByteArray) {
