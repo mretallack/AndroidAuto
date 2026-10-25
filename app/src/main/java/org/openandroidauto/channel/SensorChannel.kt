@@ -303,6 +303,9 @@ class SensorChannel(
     }
 
     private fun parseSensorData(field: Int, data: ByteArray) {
+        // Central raw trace: bytes as received + parsed integer fields, for every
+        // type. Lets the log be checked against what our scalers produce.
+        rawTrace(field, data, parseAllVarintFields(data))
         when (field) {
             1 -> parseLocation(data)
             2 -> parseCompass(data)
@@ -342,28 +345,31 @@ class SensorChannel(
         val speed = (fields[6] ?: 0).toInt() / 1000.0
         val bearing = (fields[7] ?: 0).toInt() / 1e6
         ServiceState.sensorLocation.value = ServiceState.LocationData(lat, lon, acc, alt, speed.toDouble(), bearing)
-        FileLogger.d(TAG, "Location: $lat, $lon acc=${acc}m speed=${speed}m/s")
+        // Raw ints included: negative lat/lon are sign-extended varints, so seeing
+        // the raw value makes it possible to verify the .toInt() truncation.
+        FileLogger.d(TAG, "Location: $lat, $lon acc=${acc}m speed=${speed}m/s " +
+            "raw{${rawStr(fields, 1, 2, 3, 4, 5, 6, 7)}}")
     }
 
     private fun parseCompass(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         val bearing = (fields[1] ?: 0).toInt() / 1e6
         ServiceState.sensorCompass.value = bearing
-        FileLogger.d(TAG, "Compass: %.0f°".format(bearing))
+        FileLogger.d(TAG, "Compass: %.0f°  raw{${rawStr(fields,1,2,3)}}".format(bearing))
     }
 
     private fun parseSpeed(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         val speed = (fields[1] ?: 0) / 1000.0 // speed_e3 in m/s
         ServiceState.sensorSpeed.value = speed
-        FileLogger.d(TAG, "Speed: ${speed * 3.6} km/h")
+        FileLogger.d(TAG, "Speed: ${speed * 3.6} km/h  raw{${rawStr(fields,1,2,3)}}")
     }
 
     private fun parseRpm(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         val rpm = (fields[1] ?: 0) / 1000.0
         ServiceState.sensorRpm.value = rpm
-        FileLogger.d(TAG, "RPM: %.0f".format(rpm))
+        FileLogger.d(TAG, "RPM: %.0f  raw{${rawStr(fields,1)}}".format(rpm))
     }
 
     private fun parseOdometer(data: ByteArray) {
@@ -371,7 +377,7 @@ class SensorChannel(
         val kms = (fields[1] ?: 0) / 10.0
         val tripKms = (fields[2] ?: 0) / 10.0
         ServiceState.sensorOdometer.value = ServiceState.OdometerData(kms, tripKms)
-        FileLogger.d(TAG, "Odometer: %.1f km (trip %.1f)".format(kms, tripKms))
+        FileLogger.d(TAG, "Odometer: %.1f km (trip %.1f)  raw{${rawStr(fields,1,2)}}".format(kms, tripKms))
     }
 
     private fun parseFuel(data: ByteArray) {
@@ -380,20 +386,20 @@ class SensorChannel(
         val range = (fields[2] ?: 0).toInt() // km
         val lowFuel = (fields[3] ?: 0) != 0L
         ServiceState.sensorFuel.value = ServiceState.FuelData(level, range, lowFuel)
-        FileLogger.d(TAG, "Fuel: level=$level range=$range low=$lowFuel")
+        FileLogger.d(TAG, "Fuel: level=$level range=$range low=$lowFuel  raw{${rawStr(fields,1,2,3)}}")
     }
 
     private fun parseParkingBrake(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         ServiceState.sensorParkingBrake.value = (fields[1] ?: 0) != 0L
-        FileLogger.d(TAG, "Parking brake: ${ServiceState.sensorParkingBrake.value}")
+        FileLogger.d(TAG, "Parking brake: ${ServiceState.sensorParkingBrake.value}  raw{${rawStr(fields,1)}}")
     }
 
     private fun parseGear(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         val gear = (fields[1] ?: 0).toInt()
         ServiceState.sensorGear.value = gear
-        FileLogger.d(TAG, "Gear: $gear")
+        FileLogger.d(TAG, "Gear: $gear  raw{${rawStr(fields,1)}}")
     }
 
     private fun parseDiagnostics(data: ByteArray) {
@@ -404,7 +410,7 @@ class SensorChannel(
         val fields = parseAllVarintFields(data)
         val night = (fields[1] ?: 0) != 0L
         ServiceState.sensorNightMode.value = night
-        FileLogger.w(TAG, "Night mode: $night")
+        FileLogger.w(TAG, "Night mode: $night  raw{${rawStr(fields,1)}}")
     }
 
     private fun parseEnvironment(data: ByteArray) {
@@ -413,7 +419,7 @@ class SensorChannel(
         ServiceState.sensorTemperature.value = (fields[1] ?: 0).toInt() / 1000.0
         ServiceState.sensorPressure.value = (fields[2] ?: 0).toInt() / 1000.0
         ServiceState.sensorRain.value = (fields[3] ?: 0).toInt()
-        FileLogger.d(TAG, "Environment: temp=%.1f°C pressure=%.1fkPa rain=%d".format(
+        FileLogger.d(TAG, "Environment: temp=%.1f°C pressure=%.1fkPa rain=%d  raw{${rawStr(fields,1,2,3)}}".format(
             ServiceState.sensorTemperature.value, ServiceState.sensorPressure.value, ServiceState.sensorRain.value))
     }
 
@@ -423,7 +429,7 @@ class SensorChannel(
         val current = (fields[2] ?: 0).toInt() / 1000.0
         ServiceState.sensorHvacTarget.value = target
         ServiceState.sensorHvacCurrent.value = current
-        FileLogger.d(TAG, "HVAC: target=%.1f current=%.1f".format(target, current))
+        FileLogger.d(TAG, "HVAC: target=%.1f current=%.1f  raw{${rawStr(fields,1,2)}}".format(target, current))
     }
 
     private fun parseDrivingStatus(data: ByteArray) {
@@ -433,7 +439,7 @@ class SensorChannel(
         val fields = parseAllVarintFields(data)
         val status = (fields[1] ?: 0).toInt()
         ServiceState.sensorDrivingStatus.value = status
-        FileLogger.w(TAG, "Driving status: $status (${drivingStatusText(status)})")
+        FileLogger.w(TAG, "Driving status: $status (${drivingStatusText(status)})  raw{${rawStr(fields,1)}}")
     }
 
     private fun drivingStatusText(status: Int): String {
@@ -455,13 +461,13 @@ class SensorChannel(
         val fields = parseAllVarintFields(data)
         ServiceState.sensorSteeringAngle.value = (fields[1] ?: 0).toInt() / 1000.0
         ServiceState.sensorSteeringWheelSpeed.value = (fields[2] ?: 0).toInt() / 1000.0
-        FileLogger.d(TAG, "Steering wheel: angle=${ServiceState.sensorSteeringAngle.value} speed=${ServiceState.sensorSteeringWheelSpeed.value}")
+        FileLogger.d(TAG, "Steering wheel: angle=${ServiceState.sensorSteeringAngle.value} speed=${ServiceState.sensorSteeringWheelSpeed.value}  raw{${rawStr(fields,1,2)}}")
     }
 
     private fun parsePassenger(data: ByteArray) {
         val fields = parseAllVarintFields(data)
         ServiceState.sensorPassenger.value = (fields[1] ?: 0) != 0L
-        FileLogger.d(TAG, "Passenger present: ${ServiceState.sensorPassenger.value}")
+        FileLogger.d(TAG, "Passenger present: ${ServiceState.sensorPassenger.value}  raw{${rawStr(fields,1)}}")
     }
 
     private fun parseDoor(data: ByteArray) {
@@ -491,7 +497,7 @@ class SensorChannel(
             } else break
         }
         ServiceState.sensorDoors.value = ServiceState.DoorData(hood, boot, doors)
-        FileLogger.w(TAG, "Doors: hood=$hood boot=$boot doors=${doors.map { if (it) "OPEN" else "closed" }}")
+        FileLogger.w(TAG, "Doors: hood=$hood boot=$boot doors=${doors.map { if (it) "OPEN" else "closed" }}  raw=[${data.hex()}]")
     }
 
     private fun parseLight(data: ByteArray) {
@@ -500,7 +506,7 @@ class SensorChannel(
         val indicator = (fields[2] ?: 0).toInt() // 1=NONE, 2=LEFT, 3=RIGHT
         val hazard = (fields[3] ?: 0) != 0L
         ServiceState.sensorLights.value = ServiceState.LightData(headlight, indicator, hazard)
-        FileLogger.d(TAG, "Lights: headlight=$headlight indicator=$indicator hazard=$hazard")
+        FileLogger.d(TAG, "Lights: headlight=$headlight indicator=$indicator hazard=$hazard  raw{${rawStr(fields,1,2,3)}}")
     }
 
     private fun parseTirePressure(data: ByteArray) {
@@ -513,7 +519,7 @@ class SensorChannel(
         val y = (fields[2] ?: 0).toInt() / 1000.0
         val z = (fields[3] ?: 0).toInt() / 1000.0
         ServiceState.sensorAccel.value = ServiceState.Vec3(x, y, z)
-        FileLogger.d(TAG, "Accel: %.2f, %.2f, %.2f".format(x, y, z))
+        FileLogger.d(TAG, "Accel: %.2f, %.2f, %.2f  raw{${rawStr(fields,1,2,3)}}".format(x, y, z))
     }
 
     private fun parseGyroscope(data: ByteArray) {
@@ -522,7 +528,7 @@ class SensorChannel(
         val y = (fields[2] ?: 0).toInt() / 1000.0
         val z = (fields[3] ?: 0).toInt() / 1000.0
         ServiceState.sensorGyro.value = ServiceState.Vec3(x, y, z)
-        FileLogger.d(TAG, "Gyro: %.2f, %.2f, %.2f".format(x, y, z))
+        FileLogger.d(TAG, "Gyro: %.2f, %.2f, %.2f  raw{${rawStr(fields,1,2,3)}}".format(x, y, z))
     }
 
     private fun parseGpsSatellite(data: ByteArray) {
@@ -530,7 +536,7 @@ class SensorChannel(
         val inUse = (fields[1] ?: 0).toInt()
         val inView = (fields[2] ?: 0).toInt()
         ServiceState.sensorGpsSats.value = ServiceState.GpsSatData(inUse, inView)
-        FileLogger.d(TAG, "GPS satellites: $inUse used / $inView in view")
+        FileLogger.d(TAG, "GPS satellites: $inUse used / $inView in view  raw{${rawStr(fields,1,2)}}")
     }
 
     private fun parseTollCard(data: ByteArray) {
@@ -555,6 +561,50 @@ class SensorChannel(
     }
 
     // --- Helpers ---
+
+    /**
+     * Raw trace of an inbound sensor payload: the bytes as received AND the
+     * integer fields we parsed from them.
+     *
+     * Purpose: allow the received bytes to be checked against the values we
+     * decode. Several sensor types on this HU appear as all-zero (ACCEL/GYRO)
+     * while others are clearly real (LOCATION/CAR_SPEED); the formatted display
+     * rounds to 2 dp, which would hide a small non-zero value. This logs the
+     * unscaled integers so "zero on the wire" can be distinguished from
+     * "zero after our scaling".
+     *
+     * Rate-limited: by default only the first N occurrences per type are logged
+     * at full detail (then periodically), so a 1 Hz stream cannot flood the log.
+     * Set RAW_TRACE_EVERY = 1 to log every sample.
+     */
+    private val rawTraceCounts = java.util.concurrent.ConcurrentHashMap<Int, Int>()
+    private companion object {
+        const val RAW_TRACE_FIRST = 5      // always log the first N per type
+        const val RAW_TRACE_EVERY = 30     // then every Nth
+    }
+
+    private fun rawTrace(type: Int, data: ByteArray, fields: Map<Int, Long>) {
+        val n = (rawTraceCounts[type] ?: 0) + 1
+        rawTraceCounts[type] = n
+        if (n > RAW_TRACE_FIRST && n % RAW_TRACE_EVERY != 0) return
+        val fieldStr = fields.entries.sortedBy { it.key }
+            .joinToString(" ") { "f${it.key}=${it.value}" }
+        FileLogger.w(TAG, "RAW ${SensorType.name(type)} #$n " +
+            "bytes=[${data.hex()}] fields{$fieldStr}" +
+            if (fields.isEmpty()) " ← NO VARINT FIELDS PARSED" else "")
+    }
+
+    // NOTE: no nested-message unwrapping is needed here — handleSensorBatch()
+    // already strips the outer `[tag|wt2][len]` for each field, so parsers receive
+    // the inner bytes of the sub-message. Verified against real traffic: a SPEED
+    // batch `80 03 1a 02 08 00` reaches parseSpeed as `08 00` (field 1 = 0).
+    // An earlier hypothesis that we were dropping nested payloads was WRONG; the
+    // zeros are genuine values on the wire.
+
+
+    /** Render the raw (unscaled) integer fields for a log line. */
+    private fun rawStr(fields: Map<Int, Long>, vararg keys: Int): String =
+        keys.joinToString(",") { "f$it=${fields[it] ?: "-"}" }
 
     private fun parseAllVarintFields(data: ByteArray): Map<Int, Long> {
         val fields = mutableMapOf<Int, Long>()
