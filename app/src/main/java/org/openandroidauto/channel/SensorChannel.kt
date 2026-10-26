@@ -272,18 +272,36 @@ class SensorChannel(
     private fun handleSensorBatch(payload: ByteArray) {
         var i = 0
         while (i < payload.size) {
-            val tag = payload[i].toInt() and 0xFF; i++
-            val field = tag ushr 3
-            val wireType = tag and 0x07
+            // ── Read the tag as a VARINT, not a single byte ──────────────────
+            // BUG (found 2026-10-26): this used to be `payload[i]; i++`, i.e. a
+            // one-byte tag read. Protobuf tags are varints: a tag whose first
+            // byte has the 0x80 continuation bit set spans further bytes. Tag
+            // = (field << 3) | wiretype, so any field >= 16 produces a tag
+            // >= 0x80 and therefore a 2-byte tag on the wire.
+            //
+            // ACCEL (19) and GYRO (20) are exactly those fields. Reading one byte
+            // gave a bogus "length" of 1 and we then took a single payload byte —
+            // hence the long-standing "ACCEL/GYRO deliver 1 byte but declare 20-38"
+            // anomaly. The bytes were on the wire all along; we were mis-framing
+            // them. Fields 1..15 were unaffected, which is why LOCATION, CAR_SPEED,
+            // DRIVING_STATUS, NIGHT_DATA and PARKING_BRAKE always worked.
+            val (tag, tagBytes) = readVarint(payload, i)
+            i += tagBytes
+            val field = (tag ushr 3).toInt()
+            val wireType = (tag and 0x07).toInt()
             if (wireType == 2) {
-                var len = 0; var shift = 0
-                while (i < payload.size) {
-                    val b = payload[i].toInt() and 0xFF; i++
-                    len = len or ((b and 0x7F) shl shift)
-                    if (b and 0x80 == 0) break
-                    shift += 7
+                val (lenLong, lenBytes) = readVarint(payload, i)
+                i += lenBytes
+                val len = lenLong.toInt()
+                // Guard: a declared length beyond the buffer means a malformed or
+                // truncated message. Previously this `break` silently abandoned the
+                // remainder of the batch; log it so a framing problem is visible
+                // rather than looking like "the sensor sent nothing".
+                if (len < 0 || i + len > payload.size) {
+                    FileLogger.w(TAG, "SENSOR FRAMING: field $field declares len=$len " +
+                        "but only ${payload.size - i} bytes remain — aborting batch")
+                    break
                 }
-                if (i + len > payload.size) break
                 val data = payload.copyOfRange(i, i + len)
                 // Bookkeeping: which types actually deliver data (not just an OK on
                 // subscribe). Field number == SensorType value. Log the FIRST time
@@ -296,9 +314,12 @@ class SensorChannel(
                 parseSensorData(field, data)
                 i += len
             } else if (wireType == 0) {
-                while (i < payload.size && payload[i].toInt() and 0x80 != 0) i++
-                i++
-            } else break
+                val (_, n) = readVarint(payload, i)
+                i += n
+            } else {
+                FileLogger.w(TAG, "SENSOR FRAMING: unsupported wiretype $wireType for field $field")
+                break
+            }
         }
     }
 
@@ -601,6 +622,23 @@ class SensorChannel(
     // An earlier hypothesis that we were dropping nested payloads was WRONG; the
     // zeros are genuine values on the wire.
 
+
+    /**
+     * Read a protobuf varint starting at [start].
+     * @return the value and how many bytes it occupied.
+     */
+    private fun readVarint(data: ByteArray, start: Int): Pair<Long, Int> {
+        var value = 0L; var shift = 0; var i = start
+        while (i < data.size) {
+            val b = data[i].toInt() and 0xFF
+            i++
+            value = value or ((b and 0x7F).toLong() shl shift)
+            if (b and 0x80 == 0) break
+            shift += 7
+            if (shift > 63) break   // malformed; bail rather than loop
+        }
+        return value to (i - start)
+    }
 
     /** Render the raw (unscaled) integer fields for a log line. */
     private fun rawStr(fields: Map<Int, Long>, vararg keys: Int): String =

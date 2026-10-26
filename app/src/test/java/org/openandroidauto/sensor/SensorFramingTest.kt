@@ -127,29 +127,81 @@ class SensorFramingTest {
     // ── Level 5: the anomalous ACCEL/GYRO payloads ────────────────────────────
 
     @Test
-    fun `single-byte accel payload yields no usable axes`() {
-        // A well-formed Accel needs three varints (x, y, z). One byte cannot
-        // carry them, so this must NOT be silently reported as a real sample.
-        feed(CapturedSensorVectors.ACCEL_STUB_ONE_BYTE)
+    fun `malformed length does not throw or yield a bogus sample`() {
+        // Declares length 0x18 (24) with no bytes present. Before the fix this
+        // silently produced a 1-byte "sample"; now it aborts cleanly.
+        feed(CapturedSensorVectors.MALFORMED_LEN_TOO_LONG)
         val a = ServiceState.sensorAccel.value
-        assertEquals("all axes zero", 0.0, a.x + a.y + a.z, 0.0)
+        assertEquals("no bogus axes", 0.0, a.x + a.y + a.z, 0.0)
     }
 
     @Test
-    fun `accel and gyro register as delivering despite stub payloads`() {
-        // Documents current behaviour: the type is marked "delivered" purely
-        // because a message arrived, even though the content is not usable.
-        // This test exists so the distinction is visible, per
-        // docs/protocol.md §5 — "accepted/delivering" != "useful data".
-        feed(CapturedSensorVectors.ACCEL_STUB_ONE_BYTE)
-        feed(CapturedSensorVectors.GYRO_STUB_ONE_BYTE)
-        assertTrue("ACCEL marked as delivered",
-            ServiceState.sensorsWithData.value.contains(19))
-        assertTrue("GYRO marked as delivered",
-            ServiceState.sensorsWithData.value.contains(20))
+    fun `empty accel field is tolerated`() {
+        feed(CapturedSensorVectors.EMPTY_ACCEL_FIELD)
+        assertEquals(0.0, ServiceState.sensorAccel.value.x, 0.0)
     }
 
     // ── Level 6: unknown fields must be logged with their bytes ───────────────
+
+    // ── Regression: multi-byte (>=0x80) tags ──────────────────────────────────
+    // The bug: ACCEL(19) and GYRO(20) have tags 0x9a / 0xa2 whose high bit is
+    // set, so they are 2-byte varints. Reading the tag as one byte made 0x01 look
+    // like a 1-byte length, so we took a single payload byte and threw the rest
+    // away — the "declares 20-38 bytes, delivers 1" anomaly.
+
+    @Test
+    fun `accel with a 2-byte tag decodes all three axes`() {
+        feed(CapturedSensorVectors.ACCEL_REAL_1)
+        val a = ServiceState.sensorAccel.value
+        // Body `08 ee 05 10 f2 02 18 f0 4c`:
+        //   x = 0xee 0x05 -> 750  -> 0.750
+        //   y = 0xf2 0x02 -> 370  -> 0.370
+        //   z = 0xf0 0x4c -> 9840 -> 9.840
+        assertEquals("x", 0.750, a.x, 1e-6)
+        assertEquals("y", 0.370, a.y, 1e-6)
+        assertEquals("z", 9.840, a.z, 1e-6)
+    }
+
+    @Test
+    fun `all captured accel messages decode to non-zero axes`() {
+        for (vec in listOf(
+            CapturedSensorVectors.ACCEL_REAL_1,
+            CapturedSensorVectors.ACCEL_REAL_2,
+            CapturedSensorVectors.ACCEL_REAL_3
+        )) {
+            feed(vec)
+            val a = ServiceState.sensorAccel.value
+            assertTrue("at least one axis must be non-zero for ${
+                vec.joinToString(" ") { "%02x".format(it) }}",
+                a.x != 0.0 || a.y != 0.0 || a.z != 0.0)
+        }
+    }
+
+    @Test
+    fun `gyro with a 2-byte tag decodes all three axes`() {
+        feed(CapturedSensorVectors.GYRO_REAL_ZERO)
+        val zero = ServiceState.sensorGyro.value
+        assertEquals("all-zero sample x", 0.0, zero.x, 1e-6)
+        assertEquals("all-zero sample y", 0.0, zero.y, 1e-6)
+        assertEquals("all-zero sample z", 0.0, zero.z, 1e-6)
+
+        feed(CapturedSensorVectors.GYRO_REAL_2)
+        // 08 02 -> x=2/1000=0.002 ; 10 01 -> y=0.001 ; 18 00 -> z=0
+        val g = ServiceState.sensorGyro.value
+        assertEquals("x", 0.002, g.x, 1e-6)
+        assertEquals("y", 0.001, g.y, 1e-6)
+        assertEquals("z", 0.0, g.z, 1e-6)
+    }
+
+    @Test
+    fun `tag varint is read past the continuation bit`() {
+        // Explicit guard on the mechanism: 0x9a has bit 7 set, so the tag needs a
+        // second byte. If the reader regresses to one byte, the length becomes 1
+        // and all three axes collapse to zero.
+        feed(CapturedSensorVectors.ACCEL_REAL_1)
+        val a = ServiceState.sensorAccel.value
+        assertNotEquals("must not read a 1-byte tag (x would be 0)", 0.0, a.x, 0.0)
+    }
 
     @Test
     fun `a well-formed 3-axis accel decodes to real values`() {

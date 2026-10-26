@@ -174,6 +174,10 @@ OUT_OF_MEMORY        = -255
 only the low byte — not a proprietary HU code. **Unverified**, but it fits
 exactly and it is our parser, not the HU, that is the likely culprit.
 
+This is the same class of defect as the tag bug in §5.3c: we read a value as one
+byte when the wire format allows more. `SensorStartResponseMessage.status` is an
+enum (`int32`) and must be read as a **full varint with sign extension**.
+
 Our current reader: `payload[1].toInt() and 0xFF` — takes one byte and masks.
 To read a protobuf `int32` properly we must read the **full varint** and
 sign-extend it. TODO.
@@ -197,65 +201,32 @@ Confirmed against real captures: `80 03 1a 03 08 80 25` → speed `4736/1000` =
 4.736 m/s, and LOCATION's nested body carries 7 fields including a
 sign-extended negative longitude (`18 94 c2 b2 ef ff ff ff ff ff 01`).
 
-### 5.3c ⚠️ ACCEL/GYRO: "1 byte delivered, 20-38 declared"
-Observed 2026-10-26 (and recurring): ACCEL/GYRO messages declare 20-38 bytes but
-our parser receives **exactly 1 byte** — e.g. `[18]`, `[19]`, `[0f]`.
+### 5.3c ✅ RULED OUT: ACCEL/GYRO were never broken (fixed 2026-10-26)
+**This was our bug, and it is fixed.** Full decrypted payloads (now logged, see
+§6.1) showed the truth:
 
-Correlated declared-vs-actual across a whole session:
+```
+80 03 | 9a 01 | 09 | 08 ee 05 10 f2 02 18 f0 4c
+msgid   tag     len   ACCEL body: x=750, y=370, z=9840
+```
 
-| Type | Declared lengths | Bytes reaching parser |
-|---|---|---|
-| LOCATION | 37, 38, 39 | 33, 34, 35 (constant −4) |
-| CAR_SPEED | 6, 7, 8 | 2, 3, 4 (constant −4) |
-| **ACCEL / GYRO** | 5, 13, 14, 21, 22, **30**, 38 | **1, 1, 1, 1, 1, 1** |
+The tag for field 19 is `(19 << 3) | 2` = 154 = `0x9A`. **`0x9A` has bit 7 set,
+so the tag is a TWO-byte varint: `9a 01`.** We were reading the tag as a single
+byte, so `0x01` looked like a length of 1 — we then took one payload byte and
+discarded the rest. Hence "declares 20-38 bytes, delivers 1".
 
-A constant −4 is correct (msgid 2 + tag 1 + len 1). **A 38-byte message yielding
-1 byte is truncation.** And `[18]` is field 3 wiretype 0 — the *z-axis tag of a
-real `Gyro` body* (`08 x 10 y 18 z`), consistent with us receiving a fragment of
-a genuine sample rather than a stub.
+Why only ACCEL/GYRO: any field ≥ 16 has a tag ≥ 0x80 and therefore a multi-byte
+varint tag. ACCEL(19) and GYRO(20) are the only such types this HU sends. Fields
+1-15 (`LOCATION`, `CAR_SPEED`, `DRIVING_STATUS`, `NIGHT_DATA`, `PARKING_BRAKE`)
+were always fine, which is exactly the pattern observed.
 
-**Conclusion: likely OUR bug, not a head-unit stub.** A well-formed `Accel` body
-must be `08 x 10 y 18 z`; one byte cannot be valid. Unit tests
-(`SensorFramingTest`) prove the decoder *can* read a proper 3-axis body, so the
-limitation is upstream of the parser. Leading suspect: a read containing several
-frames was previously logged truncated to 32 bytes, so the true frame boundaries
-could not be verified. Decrypted-payload logging is now complete (see §6).
+**Lesson: protobuf tags are varints, not bytes.** The same one-byte assumption
+was also in the length reader and in the wiretype-0 skip; all now use a shared
+`readVarint`.
 
-> HUIG says vehicle data "MUST never be faked, simulated, or falsified" and errors
-> should be reported via `SensorError` — so a HU that accepts a subscription and
-> sends junk is non-conformant either way.
-
-### 5.4 Which types can ever carry data
-`SensorTypeEnum` reserves 1–21, but `SensorEventIndication` has **no payload
-field** for:
-- **18 `TIRE`** — no field
-- **21 `GPS`** (satellites) — no field
-
-So those can never deliver, regardless of subscription. We also have an invented
-`TOLL_CARD=22` which is not in the enum at all.
-
-### 5.5 This head unit's actual capabilities
-Verified 2026-10-24 (clean run, 27 requests / 27 responses, correlation OK):
-
-**Accepted and delivering (7):** `LOCATION`(1), `CAR_SPEED`(3),
-`PARKING_BRAKE`(7), `NIGHT_DATA`(10), `DRIVING_STATUS`(13), `ACCEL`(19),
-`GYRO`(20)
-
-**Rejected (12):** `COMPASS`(2), `RPM`(4), `ODOMETER`(5), `FUEL_LEVEL`(6),
-`GEAR`(8), `DIAGNOSTICS`(9), `ENVIRONMENT`(11), `HVAC`(12), `DEAD_RECONING`(14),
-`PASSENGER`(15), `DOOR`(16), `LIGHT`(17)
-
-`acceptedButSilent` was empty — everything accepted delivered.
-
-**Units:** `Speed.speed` is m/s ×1000 (divide by 1000, then ×3.6 for km/h).
-`Location.latitude/longitude` are degrees ×1e7. Negative int32 values are
-sign-extended to 64-bit varints — `.toInt()` before scaling.
-
-### 5.6 `DEAD_RECONING` is misnamed
-Type 14's payload is `SteeringWheel` (steering_angle, wheel_speed), not dead
-reckoning. Our enum name is wrong.
-
----
+Also fixed: a declared length beyond the buffer used to `break` silently; it now
+logs `SENSOR FRAMING: …` so a framing fault is visible instead of masquerading as
+"the sensor sent nothing".
 
 ## 5.7 Test data from real captures
 Real payloads are checked in as test vectors:
@@ -385,19 +356,23 @@ nav messages to the phone.
 
 ## 11. Known ambiguities and traps (summary)
 
-1. **Sensor responses are uncorrelatable except by order** (§5.2). A dropped
+1. **Protobuf tags are VARINTS, not bytes** (§5.3c). Any field ≥ 16 has a tag
+   ≥ 0x80 and is therefore ≥ 2 bytes on the wire. Reading a tag as a single byte
+   made ACCEL/GYRO look completely broken for weeks. Same applies to lengths and
+   to `status` (§5.3).
+2. **Sensor responses are uncorrelatable except by order** (§5.2). A dropped
    response silently shifts all later verdicts. Always check
    `correlation=OK|SUSPECT`.
-2. **`AUTH_COMPLETE` must never be sent to the HU** (§2).
-3. **HU→phone `AUDIO_FOCUS_REQUEST` is a notification** — do not reply (§4).
-4. **Failure status is `247`, not the proto's `FAIL=1`** (§5.3).
-5. **Types 18 and 21 have no payload field** — they can never deliver (§5.4).
-6. **`DEAD_RECONING` (14) is actually `SteeringWheel`** (§5.6).
-7. **Video config index is ours to choose and send in SETUP** (§6.2) — the HUIG
+3. **`AUTH_COMPLETE` must never be sent to the HU** (§2).
+4. **HU→phone `AUDIO_FOCUS_REQUEST` is a notification** — do not reply (§4).
+5. **Failure status is `247`, not the proto's `FAIL=1`** (§5.3).
+6. **Types 18 and 21 have no payload field** — they can never deliver (§5.4).
+7. **`DEAD_RECONING` (14) is actually `SteeringWheel`** (§5.6).
+8. **Video config index is ours to choose and send in SETUP** (§6.2) — the HUIG
    prose contradicts the proto; trust the proto.
-8. **Video focus must be released** or the HU's own UI corrupts (§6.3).
-9. **Channel ids must be parsed, not hardcoded** (§3).
-10. **Fragmentation is off by default**, so that path is under-tested (§1).
+9. **Video focus must be released** or the HU's own UI corrupts (§6.3).
+10. **Channel ids must be parsed, not hardcoded** (§3).
+11. **Fragmentation is off by default**, so that path is under-tested (§1).
 
 ## 12. How these facts were established
 

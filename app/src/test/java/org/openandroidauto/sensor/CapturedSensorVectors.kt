@@ -60,31 +60,59 @@ object CapturedSensorVectors {
     )
 
     /**
-     * The anomalous ACCEL/GYRO cases.
+     * REAL ACCEL messages, verbatim decrypted payloads from the session log.
      *
-     * Observed: the message frame declared ~20-38 bytes, but the *inner* payload
-     * handed to the parser was a single byte (`18` for GYRO, `19` for ACCEL).
+     * These are the payloads that exposed the bug: ACCEL is field 19, so its tag
+     * `(19 << 3) | 2 = 0x9a` has the high bit set and is therefore a **2-byte
+     * varint** (`9a 01`). Reading the tag as a single byte made us treat `0x01`
+     * as a length, so we took 1 payload byte and discarded the rest.
      *
-     * These are modelled here as the outer tag (field 19/20, wiretype 2) with a
-     * 1-byte body, which is what the parser actually received. A well-formed
-     * `Accel` body needs three varints (`08 x 10 y 18 z`), so one byte can never
-     * be a valid sample — which is the point of the test.
-     *
-     * NOTE: a 1-byte body of `18` decodes as field 3 wiretype 0 — i.e. it looks
-     * like the *tail* of a real Accel message. That is the evidence that this is
-     * more likely truncation on our side than a head-unit stub.
+     * Layout of the first: `80 03 | 9a 01 | 09 | 08 ee 05 10 f2 02 18 f0 4c`
+     *   msgid   2-byte tag  len   body: x=0x05ee(1518), y=0x0172(370), z=0x4cf0(19696)
      */
-    val ACCEL_STUB_ONE_BYTE = hex("80 03 9a 01 18")
-    val GYRO_STUB_ONE_BYTE = hex("80 03 a2 01 18")
+    val ACCEL_REAL_1 = hex("80 03 9a 01 09 08 ee 05 10 f2 02 18 f0 4c")
+    val ACCEL_REAL_2 = hex("80 03 9a 01 09 08 82 06 10 fc 02 18 d2 4c")
+    val ACCEL_REAL_3 = hex("80 03 9a 01 09 08 be 06 10 f2 02 18 d2 4c")
 
     /**
-     * A well-formed 3-axis sample, for comparison.
-     * Outer: `9a 07` = field 19 (ACCEL) wiretype 2, body length 7.
-     * Body:  `08 64`  x = 100
-     *        `10 c8 01` y = 200  (2-byte varint)
-     *        `18 2c`  z = 44
+     * REAL GYRO messages. Field 20 → tag `(20 << 3) | 2 = 0xa2`, also a 2-byte
+     * varint (`a2 01`).
+     *
+     * Layout of the second: `80 03 | a2 01 | 06 | 08 00 10 00 18 00`
+     *   body: x=0, y=0, z=0
      */
-    val ACCEL_WELLFORMED = hex("80 03 9a 07 08 64 10 c8 01 18 2c")
+    val GYRO_REAL_ZERO = hex("80 03 a2 01 06 08 00 10 00 18 00")
+    val GYRO_REAL_1 = hex("80 03 a2 01 06 08 00 10 01 18 00")
+    val GYRO_REAL_2 = hex("80 03 a2 01 06 08 02 10 01 18 00")
+
+    /**
+     * A message whose declared length exceeds the bytes present — malformed or
+     * truncated. The batch walker must bail out cleanly rather than reading past
+     * the end. Before the 2026-10-26 fix such a message silently produced a
+     * garbage 1-byte "sample".
+     */
+    val MALFORMED_LEN_TOO_LONG = hex("80 03 9a 01 18")
+
+    /**
+     * A message with a tag field >= 16 (2-byte tag) and NO payload — i.e. an
+     * empty repeated field. Must be tolerated.
+     */
+    val EMPTY_ACCEL_FIELD = hex("80 03 9a 01 00")
+
+    /**
+     * A synthetic but correctly-framed 3-axis sample.
+     *
+     * NOTE the tag: field 19 → `(19 << 3) | 2` = 154 = 0x9A, and 0x9A has bit 7
+     * set, so the tag is the **2-byte varint `9a 01`**. Getting this wrong was
+     * the original bug.
+     *
+     *   `9a 01`     field 19 (ACCEL), wiretype 2
+     *   `07`        body length 7
+     *   `08 64`     x = 100
+     *   `10 c8 01`  y = 200 (2-byte varint)
+     *   `18 2c`     z = 44
+     */
+    val ACCEL_WELLFORMED = hex("80 03 9a 01 07 08 64 10 c8 01 18 2c")
 
     private fun hex(s: String): ByteArray =
         s.split(" ").filter { it.isNotBlank() }.map { it.toInt(16).toByte() }.toByteArray()
