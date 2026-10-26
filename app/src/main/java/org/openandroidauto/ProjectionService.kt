@@ -34,6 +34,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         private const val FRAGMENT_SIZE = 2048
         const val EXTRA_PROJECTION_RESULT_CODE = "projection_result_code"
         const val EXTRA_PROJECTION_DATA = "projection_data"
+        /** Max bytes of each transport read written to the log (see RAW ← lines). */
+        private const val RAW_LOG_BYTES = 256
+        /** Log every decrypted payload, not just short ones. Verbose; flip off if noisy. */
+        private const val DECRYPT_LOG_ALL = true
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -485,12 +489,18 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
             framesReceived++
             val pos = buffer.position()
+            // Log the whole read, not just the first 32 bytes. Truncating here hid
+            // the fact that one read can contain MULTIPLE frames (e.g. a 125-byte
+            // read carrying both a 29- and a 30-byte message), which made an
+            // earlier framing investigation impossible to complete from the log.
+            // Capped at 256 bytes to bound the log; the cap is stated explicitly.
             val rawHex = StringBuilder()
-            for (i in 0 until minOf(pos, 32)) { rawHex.append(String.format("%02x ", buffer[i])) }
+            for (i in 0 until minOf(pos, RAW_LOG_BYTES)) { rawHex.append(String.format("%02x ", buffer[i])) }
+            val truncNote = if (pos > RAW_LOG_BYTES) " (truncated, showing $RAW_LOG_BYTES)" else ""
             // Log the silence gap before this read: if the HU was quiet, this shows how long.
             val gap = inboundSilenceMs()
             val gapNote = if (lastInboundMs != 0L) " [gap=${gap}ms]" else ""
-            logW("RAW ← $pos bytes$gapNote: $rawHex")
+            logW("RAW ← $pos bytes$gapNote$truncNote: $rawHex")
             markInbound(-1, -1) // updated with real channel/type once decoded
 
             buffer.flip()
@@ -557,7 +567,16 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         val isTlsRecord = msg.payload.size > 5 && msg.payload[0].toInt() and 0xFF == 0x17 && msg.payload[1].toInt() and 0xFF == 0x03
         val payload = if (tls != null && tls.isHandshakeComplete && (isEncryptedFrame || isTlsRecord)) {
             val decrypted = tls.decrypt(msg.payload)
-            if (decrypted.size <= 10) {
+            // Log EVERY decrypted payload in full (capped). Previously only those
+            // <=10 bytes were printed, which hid exactly the messages under
+            // investigation: the sensor messages that declare 20-38 bytes but
+            // allegedly deliver 1. Without the plaintext there is no way to tell
+            // a head-unit stub from a bug in our own slicing.
+            if (DECRYPT_LOG_ALL) {
+                val preHex = msg.payload.take(24).joinToString(" ") { String.format("%02x", it) }
+                logW("  decrypt: ${msg.payload.size}→${decrypted.size} pre=[$preHex] " +
+                    "post=[${decrypted.hex(128)}]")
+            } else if (decrypted.size <= 10) {
                 val preHex = msg.payload.take(20).joinToString(" ") { String.format("%02x", it) }
                 val postHex = decrypted.joinToString(" ") { String.format("%02x", it) }
                 logW("  decrypt: ${msg.payload.size}→${decrypted.size} pre=[$preHex] post=[$postHex]")

@@ -154,9 +154,76 @@ correlation=OK|SUSPECT (matched=N unmatched=N pending=N)
 > **Rule: treat any `SUSPECT` run's per-type verdicts as invalid.** The
 > surrounding data (timings, gaps, other channels) is still fine.
 
-### 5.3 Status codes
-`StatusEnum` says `OK=0`, `FAIL=1`. **This HU returns `247` for failure.** Be
-tolerant of non-standard codes; treat `0` as OK and everything else as failure.
+### 5.3 Status codes — ⚠️ `247` is probably OUR truncation
+We observed `status=247` for rejected subscriptions. **`247` is not in
+`StatusEnum` at all.** External research (2026-10-26) found the real enum uses
+**signed negative** values:
+
+```
+OK = 0
+INVALID_SENSOR       = -9
+COMMAND_NOT_SUPPORTED = -250
+FRAMING_ERROR        = -251
+BUS_UNEXPECTED       = -253
+BUSY                 = -254
+OUT_OF_MEMORY        = -255
+```
+
+`-9` as a 32-bit value is `0xFFFFFFF7`; **truncated to one byte that is `0xF7` =
+247.** So `247` is most likely `INVALID_SENSOR` that we are mangling by reading
+only the low byte — not a proprietary HU code. **Unverified**, but it fits
+exactly and it is our parser, not the HU, that is the likely culprit.
+
+Our current reader: `payload[1].toInt() and 0xFF` — takes one byte and masks.
+To read a protobuf `int32` properly we must read the **full varint** and
+sign-extend it. TODO.
+
+### 5.3b How SensorEventIndication is actually encoded
+Every field is `repeated data.X` — i.e. **wiretype 2 (length-delimited nested
+message)**, `tag = (SensorType << 3) | 2`:
+
+```
+80 03 | 1a 03 | 08 80 25
+msgid   tag   │  └ nested Speed body: field 1 (speed), varint 0x1280 = 4736
+        f3 wt2└ len 3
+```
+
+Two consequences we got wrong or nearly got wrong:
+1. **The body must be recursed into**, not read as raw outer varints.
+2. **One message may carry several sensor types** ("one or more sensor types per
+   message"), and each field is repeated to allow batching.
+
+Confirmed against real captures: `80 03 1a 03 08 80 25` → speed `4736/1000` =
+4.736 m/s, and LOCATION's nested body carries 7 fields including a
+sign-extended negative longitude (`18 94 c2 b2 ef ff ff ff ff ff 01`).
+
+### 5.3c ⚠️ ACCEL/GYRO: "1 byte delivered, 20-38 declared"
+Observed 2026-10-26 (and recurring): ACCEL/GYRO messages declare 20-38 bytes but
+our parser receives **exactly 1 byte** — e.g. `[18]`, `[19]`, `[0f]`.
+
+Correlated declared-vs-actual across a whole session:
+
+| Type | Declared lengths | Bytes reaching parser |
+|---|---|---|
+| LOCATION | 37, 38, 39 | 33, 34, 35 (constant −4) |
+| CAR_SPEED | 6, 7, 8 | 2, 3, 4 (constant −4) |
+| **ACCEL / GYRO** | 5, 13, 14, 21, 22, **30**, 38 | **1, 1, 1, 1, 1, 1** |
+
+A constant −4 is correct (msgid 2 + tag 1 + len 1). **A 38-byte message yielding
+1 byte is truncation.** And `[18]` is field 3 wiretype 0 — the *z-axis tag of a
+real `Gyro` body* (`08 x 10 y 18 z`), consistent with us receiving a fragment of
+a genuine sample rather than a stub.
+
+**Conclusion: likely OUR bug, not a head-unit stub.** A well-formed `Accel` body
+must be `08 x 10 y 18 z`; one byte cannot be valid. Unit tests
+(`SensorFramingTest`) prove the decoder *can* read a proper 3-axis body, so the
+limitation is upstream of the parser. Leading suspect: a read containing several
+frames was previously logged truncated to 32 bytes, so the true frame boundaries
+could not be verified. Decrypted-payload logging is now complete (see §6).
+
+> HUIG says vehicle data "MUST never be faked, simulated, or falsified" and errors
+> should be reported via `SensorError` — so a HU that accepts a subscription and
+> sends junk is non-conformant either way.
 
 ### 5.4 Which types can ever carry data
 `SensorTypeEnum` reserves 1–21, but `SensorEventIndication` has **no payload
@@ -189,6 +256,20 @@ Type 14's payload is `SteeringWheel` (steering_angle, wheel_speed), not dead
 reckoning. Our enum name is wrong.
 
 ---
+
+## 5.7 Test data from real captures
+Real payloads are checked in as test vectors:
+`app/src/test/java/org/openandroidauto/sensor/CapturedSensorVectors.kt`
+(session `2026-10-26_08-54-38`). Tests exercising the whole chain:
+
+- `SensorFramingTest` — message id → outer tag → nested body → scaled value,
+  including multi-byte varints, the sign-extended negative longitude, the
+  bitmask driving status, and the malformed 1-byte ACCEL/GYRO case.
+- `MessageFramerCapturedTest` — framing: several frames per read, partial
+  trailing frame, big-endian lengths, and "declared length == bytes carried".
+
+When adding a new sensor bug, **add the offending bytes as a vector** rather
+than describing them in prose.
 
 ## 6. Video
 
