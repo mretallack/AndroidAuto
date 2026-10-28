@@ -538,10 +538,20 @@ they would all read "rejects" misleadingly before the first response).
 
 Footer summarises: `HU accepts: …` and `Accepted but silent: …`.
 
-Note some fields can **never** populate: `Sats` (type 21) and tire pressure
-(type 18) have no payload field in `SensorEventIndication`; parking brake (7),
-odometer (5), gear (8), environment (11), HVAC (12), steering (14), passenger
-(15), lights (17), accel (19) and gyro (20) are rejected by this HU.
+Types that can **never** populate, for two different reasons:
+
+- **No payload field exists** in `SensorEventIndication`: `Sats` (21), tire
+  pressure (18). Nothing can arrive for these.
+- **This HU declines them**: compass (2), RPM (4), odometer (5), fuel (6),
+  gear (8), diagnostics (9), environment (11), HVAC (12), steering (14),
+  passenger (15), doors (16), lights (17).
+
+The second group is **not a defect** — most sensor types are OPTIONAL in the
+spec and a head unit "MUST never be faked, simulated, or falsified" data it does
+not have, so declining is the conformant behaviour. See `protocol.md` §5.6b.
+
+Verified working on this HU (2026-10-27): LOCATION, CAR_SPEED, ACCEL, GYRO,
+PARKING_BRAKE, DRIVING_STATUS, NIGHT_DATA — 7 types with real data.
 
 ## 6.2 Current log lines
 - `RAW ← N bytes [gap=Xms]` — inbound frame + silence gap before it.

@@ -228,6 +228,60 @@ Also fixed: a declared length beyond the buffer used to `break` silently; it now
 logs `SENSOR FRAMING: …` so a framing fault is visible instead of masquerading as
 "the sensor sent nothing".
 
+## 5.6b ⚠️ "Rejected" types are NOT a defect — the HU is being conformant
+
+It is tempting to read our "12 rejected types" list as a deficiency, in the
+phone side or the head unit. It is neither. **The spec makes almost everything
+optional, and explicitly forbids a HU from faking data it does not have.**
+
+From HUIG v1.3 "Integrating Vehicle Data" (verified directly against
+<https://milek7.pl/.stuff/galdocs/huig13_cache.html>):
+
+> "Vehicle data MUST be shared as specified below, and **MUST never be faked,
+> simulated, or falsified**."
+
+and for gear specifically:
+
+> "If present, it MUST accurately represent the actual transmission/gear status
+> and MUST NOT be synthesized. **If the actual transmission/gear status is not
+> available, this status SHOULD NOT be sent.**"
+
+**Only these are genuinely REQUIRED:**
+
+| Type | Required |
+|---|---|
+| Drive Level (our `DRIVING_STATUS`) | **REQUIRED** |
+| Day/Night Mode (our `NIGHT_DATA`) | **REQUIRED** |
+| GPS location | required *if the HU has nav sensors* |
+| Car speed | required *if present* |
+| Accelerometer / Gyroscope | required *if present* |
+
+Everything else is OPTIONAL: RPM, gear, odometer, parking brake, fuel level /
+range, compass, doors, headlights, tire pressure, passenger presence, outside
+temperature / pressure / HVAC, OBD diagnostics.
+
+So refusing RPM/gear/fuel is the **conformant** behaviour when the HU does not
+have those signals. The spec offers `SensorError` for reporting this, but says
+errors *"can"* be reported — it does not mandate it, so a silent rejection is
+permitted.
+
+**Why this particular subset.** Physical CAN topology: the infotainment unit
+sits on the comfort/media bus and can see wheel speed (ABS), parking brake (a
+simple bit), and its own GPS/IMU. RPM, gearbox, HVAC and OBD-II live on the
+**powertrain** bus, reachable only through a CAN gateway the manufacturer must
+deliberately route — cost with no consumer benefit. *(Inferred from CAN topology
+plus the spec; no OEM policy document was found.)*
+
+**Official Android Auto sees the same subset.** Same channel, same rules. AA's
+projected API exposes speed, odometer, fuel, location, accel/gyro and compass
+(permission-gated), and **does not expose RPM or gear at all**. Google's docs
+warn: *"Don't assume that the car's data is available at all times."* The two
+signals AA genuinely needs are **speed** (keyboard lockout while moving) and
+**day/night + drive level** — all of which this HU provides.
+
+**Consequence for us:** the 7 working types are the realistic ceiling for this
+unit. Do not treat the rejected list as a bug to fix.
+
 ## 5.7 Test data from real captures
 Real payloads are checked in as test vectors:
 `app/src/test/java/org/openandroidauto/sensor/CapturedSensorVectors.kt`
@@ -373,6 +427,8 @@ nav messages to the phone.
 9. **Video focus must be released** or the HU's own UI corrupts (§6.3).
 10. **Channel ids must be parsed, not hardcoded** (§3).
 11. **Fragmentation is off by default**, so that path is under-tested (§1).
+12. **A HU rejecting sensor types is correct, not a defect** (§5.6b). Most types
+    are OPTIONAL and the spec forbids faking absent data.
 
 ## 12. How these facts were established
 
