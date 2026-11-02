@@ -44,6 +44,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
     // Per-attempt job: owns this session's read/write/ping loops so teardown can
     // cancel them before a retry (prevents a stale loop writing to a dead fd).
     private var sessionJob: Job? = null
+    // Outer session loop (one per service instance). Guards against a second
+    // onStartCommand — e.g. a projection delivered to an already-running service —
+    // spawning a duplicate session.
+    private var sessionRunner: Job? = null
     // Set when a session's read loop fails; consumed by sessionWithReconnect.
     @Volatile private var sessionEndReason: String? = null
     private val writeQueue = CoChannel<ByteArray>(capacity = 64)
@@ -169,13 +173,40 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         @Suppress("DEPRECATION")
         val projectionData: Intent? = intent?.getParcelableExtra(EXTRA_PROJECTION_DATA)
         if (resultCode != 0 && projectionData != null) {
+            // Android 14+: the service must already be running as a foreground
+            // service of type mediaProjection before the projection can be obtained,
+            // or getMediaProjection() throws SecurityException. onCreate only started
+            // us as connectedDevice, so promote the foreground-service type here first.
+            startForeground(NOTIFICATION_ID, buildNotification("Screen capture..."),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             val projectionManager = getSystemService(android.media.projection.MediaProjectionManager::class.java)
-            mediaProjection = projectionManager.getMediaProjection(resultCode, projectionData)
-            logW("MediaProjection obtained successfully")
-        } else {
+            val projection = projectionManager.getMediaProjection(resultCode, projectionData)
+            if (projection != null) {
+                val existing = mediaProjection
+                mediaProjection = projection
+                logW("MediaProjection obtained successfully" +
+                    if (existing != null) " (replacing previous)" else "")
+                if (existing != null && existing !== projection) {
+                    try { existing.stop() } catch (_: Exception) {}
+                }
+                // If the service was already running (auto-started in test-pattern
+                // mode), hand the new projection to the live video channel and let it
+                // switch the source to screen capture.
+                val vc = videoChannel
+                if (vc != null) vc.applyProjection(projection)
+                else logW("Video channel not created yet — screen capture applies on START")
+            } else {
+                logW("MediaProjection request returned null — will send black frames")
+            }
+        } else if (mediaProjection == null) {
             logW("No MediaProjection - will send black frames")
         }
-        scope.launch { sessionWithReconnect(this) }
+        // Only one session loop per service instance. A projection delivered to an
+        // already-running service re-enters onStartCommand and must not start a second.
+        if (sessionRunner?.isActive != true) {
+            sessionRunner = scope.launch { sessionWithReconnect(this) }
+        }
         return START_NOT_STICKY
     }
 

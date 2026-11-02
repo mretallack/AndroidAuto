@@ -121,11 +121,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkAutoStart() {
-        // Auto-start if USB accessory is connected
+        // Connect to the head unit as soon as the USB accessory appears. The HU
+        // starts its AA session only once, on attach, and rejects a late
+        // VERSION_REQUEST with MESSAGE_UNEXPECTED_MESSAGE (0x00FF) — so we must be
+        // connected promptly, BEFORE the user finishes the MediaProjection consent
+        // flow. Auto-start therefore is NOT gated on the video mode.
         val accessory = UsbAoaTransport.findAccessory(this)
         if (accessory != null && !serviceStarted) {
             ServiceState.addEvent("Auto-starting (USB detected)")
             startService()
+            // In screen-capture mode, request consent now and deliver the projection
+            // to the already-running service, which swaps the live video source on
+            // receipt (see ProjectionService.onStartCommand / VideoChannel.applyProjection).
+            if (!ServiceState.testPatternEnabled.value) {
+                val pm = getSystemService(MediaProjectionManager::class.java)
+                screenCaptureLauncher.launch(pm.createScreenCaptureIntent())
+            }
         }
     }
 
@@ -332,12 +343,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startServiceWithProjection(resultCode: Int, data: Intent) {
-        if (serviceStarted) return
-        if (isProjectionServiceRunning()) {
-            FileLogger.w(TAG, "ProjectionService already running — not starting a second instance")
-            serviceStarted = true
-            return
-        }
+        // Deliver the projection to the service. If an instance is already running
+        // (e.g. auto-started, or the Activity was recreated), startForegroundService
+        // re-enters onStartCommand and the running service adopts the projection —
+        // so we no longer discard it as a "second instance" (that made the Screen
+        // capture option a silent no-op).
         serviceStarted = true
         val serviceIntent = Intent(this, ProjectionService::class.java).apply {
             putExtra(ProjectionService.EXTRA_PROJECTION_RESULT_CODE, resultCode)

@@ -14,6 +14,9 @@ import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+/** Minimum gap between forwarded non-keyframes for real screen capture (~12 fps). */
+private const val REAL_CAPTURE_MIN_FRAME_INTERVAL_MS = 80L
+
 object AVMessageType {
     const val AV_MEDIA_WITH_TIMESTAMP: Int = 0x0000
     const val AV_MEDIA: Int = 0x0001
@@ -86,6 +89,14 @@ class VideoChannel(
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private var running = false
+    /**
+     * True when the encoder is fed by real screen capture (MediaProjection) as
+     * opposed to the test pattern. Real capture produces display-rate output
+     * (30-60 fps); the HU drops the link within seconds under that load (observed
+     * 2026-11-02: screen capture died in ~3 s vs minutes for the ~1 fps test
+     * pattern). Non-keyframes are therefore rate-capped on the wire.
+     */
+    @Volatile private var screenCaptureSource = false
     private var unackedFrames = 0
     private val unackedLock = Object()
 
@@ -102,6 +113,42 @@ class VideoChannel(
 
     fun setMediaProjection(projection: MediaProjection) {
         mediaProjection = projection
+    }
+
+    /**
+     * Adopt a MediaProjection that arrived after this channel already exists. The
+     * service can auto-start (test pattern) before the user grants capture consent,
+     * so the projection may land late — possibly while the test pattern is already
+     * streaming. If so, restart the encoder on the real screen source, preserving
+     * the video session's focus/state.
+     */
+    fun applyProjection(projection: MediaProjection) {
+        mediaProjection = projection
+        if (!running) {
+            FileLogger.w(TAG, "applyProjection: no encoding yet — screen capture used on START")
+            return
+        }
+        FileLogger.w(TAG, "applyProjection: switching live video source → screen capture")
+        val wasState = state
+        val wasFocus = synchronized(videoFocusLock) { videoFocusHeld }
+        stopEncoderOnly()
+        // Preserve session focus/state across the source swap.
+        synchronized(videoFocusLock) { videoFocusHeld = wasFocus }
+        state = if (wasState == VideoState.IDLE) VideoState.STARTED else wasState
+        startRealEncoding()
+    }
+
+    /** Tear down just the encoder/threads; session state and focus are left intact. */
+    private fun stopEncoderOnly() {
+        running = false
+        // Let the draw/output threads observe running=false and exit before the
+        // surface fields are re-created for the new source (otherwise the old
+        // test-pattern draw thread could paint over the real screen surface).
+        try { Thread.sleep(80) } catch (_: InterruptedException) {}
+        try { encoder?.stop() } catch (_: Exception) {}
+        encoder?.release(); encoder = null
+        inputSurface?.release(); inputSurface = null
+        virtualDisplay?.release(); virtualDisplay = null
     }
 
     fun onMessage(messageType: Int, payload: ByteArray) {
@@ -302,6 +349,7 @@ class VideoChannel(
      * Produces valid H.264 Baseline at exact 30fps without needing MediaProjection.
      */
     private fun startTestPatternEncoding() {
+        screenCaptureSource = false
         try {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, config.width, config.height).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
@@ -397,6 +445,7 @@ class VideoChannel(
 
     private fun startRealEncoding() {
         val projection = mediaProjection ?: return
+        screenCaptureSource = true
         try {
             projection.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
@@ -407,6 +456,12 @@ class VideoChannel(
 
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, config.width, config.height).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
+                // Constrain the encoder to a real bitrate. Without an explicit mode
+                // MediaCodec runs quality-driven and emits huge frames (up to ~176 KB
+                // observed 2026-11-02), overshooting the 250 kbps target ~3x and
+                // tripping the HU's link drop within seconds.
+                setInteger(MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
                 setInteger(MediaFormat.KEY_FRAME_RATE, config.fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -482,6 +537,7 @@ class VideoChannel(
             val bufferInfo = MediaCodec.BufferInfo()
             var firstTimestampUs = -1L
             var codecConfig: ByteArray? = null
+            var lastForwardMs = 0L
             while (running) {
                 val codec = encoder ?: break
                 val index = codec.dequeueOutputBuffer(bufferInfo, 10_000)
@@ -501,13 +557,23 @@ class VideoChannel(
                         if (firstTimestampUs < 0) firstTimestampUs = bufferInfo.presentationTimeUs
                         val relativeTimestampUs = bufferInfo.presentationTimeUs - firstTimestampUs
 
+                        val isKey = bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                         val annexBData = ensureAnnexB(data)
-                        val frameData = if (codecConfig != null &&
-                            (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)) {
+                        val frameData = if (codecConfig != null && isKey) {
                             codecConfig!! + annexBData
                         } else annexBData
 
-                        sendVideoFrame(frameData, relativeTimestampUs)
+                        // Rate-cap real screen capture on the wire: forward at most
+                        // ~12 fps of non-keyframes (keyframes always pass so the HU
+                        // decoder can resync). The test pattern is already event-driven.
+                        val now = System.currentTimeMillis()
+                        if (screenCaptureSource && !isKey &&
+                            now - lastForwardMs < REAL_CAPTURE_MIN_FRAME_INTERVAL_MS) {
+                            framesRateCapped++
+                        } else {
+                            lastForwardMs = now
+                            sendVideoFrame(frameData, relativeTimestampUs)
+                        }
                     }
                     codec.releaseOutputBuffer(index, false)
                 }
@@ -567,6 +633,7 @@ class VideoChannel(
         "videoFramesSent=$framesSent videoBytesSent=$bytesSent " +
         "videoFramesAcked=$framesAcked videoBytesAcked=$bytesAcked " +
         "focusSuppressed=$framesSuppressedForFocus focusHeld=$videoFocusHeld " +
+        "rateCapped=$framesRateCapped " +
         "unacked=$unackedFrames maxUnacked=$maxUnacked"
 
     private fun handleMediaAck(payload: ByteArray) {
@@ -587,6 +654,8 @@ class VideoChannel(
     @Volatile var bytesAcked: Long = 0L; private set
     /** Frames dropped because the HU held video focus (e.g. reversing camera). */
     @Volatile var framesSuppressedForFocus: Long = 0L; private set
+    /** Frames dropped by the real-capture wire rate cap (see sendVideoFrame path). */
+    @Volatile var framesRateCapped: Long = 0L; private set
 
     /** Test seam: lets unit tests drive the focus gate directly. */
     internal fun sendVideoFrameForTest(nalData: ByteArray, timestampUs: Long) =
