@@ -103,6 +103,10 @@ image**. Reproduced repeatedly 2026-10-19; does not happen without our app.
 **Fix:** `sendVideoFrame()` is gated on a `videoFocusHeld` flag — frames are
 suppressed immediately on `UNFOCUSED` and resume on `FOCUSED`. Suppressed-frame
 count is logged (`focusSuppressed=`).
+**Follow-up fix 2026-11-01:** when focus was *regained* the video did not always
+resume (e.g. the test pattern never came back after the reverse overlay).
+On regain we now re-claim focus (`VIDEO_FOCUS_REQUEST`, 0x8007) and force an
+encoder IDR (`requestKeyframe()`), so the HU decoder resyncs immediately.
 
 ## 1.9 Event-driven video ✅ IMPLEMENTED 2026-10-19
 HUIG: *"the AAP protocol sends video frames only for projection UI updates (and
@@ -124,6 +128,55 @@ showed the **HU dropping VBUS**. The phone is a passive victim.
 ## 1.11 Unopened channels ❓
 HU advertises 9 channels; we open 5 (video, input, audio, sensor, BT).
 Unknown whether the HU expects all to be opened. Low priority.
+
+## 1.12 Connect promptly after USB attach — ✅ FIXED 2026-11-02
+The HU opens its AA session **once**, immediately after the accessory attaches.
+If ours starts too late it answers our first message — `VERSION_REQUEST` — with
+`MESSAGE_UNEXPECTED_MESSAGE` (**0x00FF**) and never proceeds to TLS/AUTH.
+**Bug:** auto-start had been gated on the video mode, so in screen-capture mode
+we connected only *after* the user finished the MediaProjection consent dialog
+(~10 s) — by then the HU had given up.
+**Fix:** always auto-start on USB attach (never gate it on video mode) and, in
+screen-capture mode, request MediaProjection consent at auto-start; the
+projection is delivered to the already-running service afterwards (see §1.13).
+```text
+RAW ← 6 bytes: 00 0b 00 02 00 ff
+Unknown 0x00FF message - may indicate protocol mismatch
+```
+**Status:** fixed and verified — TLS + AUTH complete in the post-fix runs.
+
+## 1.13 Real screen capture — ✅ WORKING 2026-11-02
+`startEncoding()` selects the encoder source from the video mode:
+`testPatternEnabled=false` **and** a `MediaProjection` present → real capture;
+otherwise the test pattern. Three bugs made the Screen-capture option a silent
+no-op or a crash:
+1. **Dead branch** — `startEncoding()` was hard-wired to
+   `startTestPatternEncoding()`; `startRealEncoding()` was unreachable.
+2. **Projection discarded** — `checkAutoStart()` started the service on USB
+   attach, then `startServiceWithProjection()` saw it running and *dropped* the
+   MediaProjection ("already running — not starting a second instance").
+3. **FGS crash** — Android 14 throws `SecurityException` if
+   `getMediaProjection()` runs while the service is only
+   `connectedDevice`; the foreground-service type must be promoted to
+   `mediaProjection|connectedDevice` **first**.
+Fixes: the projection is now adopted by the running service
+(`VideoChannel.applyProjection()` hot-swaps the source, preserving focus/state);
+`startForeground(...)` is called before `getMediaProjection()`.
+
+### Wire rate must be constrained (CBR + rate cap)
+Real capture emits display-rate H.264 (30–60 fps) whereas the test pattern is
+~1 fps event-driven. Two controls keep it inside the HU's budget:
+- **`KEY_BITRATE_MODE = BITRATE_MODE_CBR`.** Without an explicit mode MediaCodec
+  is *quality-driven* and emitted frames up to **~176 KB each** — ~3–6× the
+  250 kbps target — which tripped the HU's link drop within seconds.
+- **Wire rate cap** — non-keyframes are forwarded at most every 80 ms (~12 fps);
+  keyframes always pass so the HU decoder can resync. Dropped frames are counted
+  as `rateCapped=` in the budget line.
+
+**Measured effect:** byte rate dropped **~6×** (90–113 KB/s → **~14–18 KB/s**);
+one screen-capture session then ran **~2 min** before the cable was pulled.
+*Note:* the rate cap alone was insufficient — the problem was frame **size**, not
+frame **count**; CBR was the actual fix.
 
 ---
 
@@ -215,9 +268,15 @@ Android background/Doze/wake locks · phone USB driver bug.
    time-to-death at 10× less data, and the inability of the official app to
    trigger it. *Leading hypothesis.*
 2. **Something structural we still don't replicate** — e.g. the focus handshake
-   (§1.8), or a periodic message we never send.
+   (§1.8), or a periodic message we never send. *Partially addressed:* we now
+   re-claim focus (`VIDEO_FOCUS_REQUEST` 0x8007, §1.8 / TODO item 6) and force an
+   IDR on focus regain; the remaining 0x00FF mis-ordering cause is now understood
+   (§1.12).
 3. **HU enforces a cumulative frame/byte budget.** Weakened: 10× less data did
-   not obviously shorten life. Budget counters are now logged to settle it.
+   not obviously shorten life. Budget counters are now logged to settle it. *New
+   evidence (2026-11-02):* the run that died in seconds was **frame size**, not
+   count — quality-driven frames hit ~176 KB (§1.13); capping size with CBR
+   stopped the fast death.
 4. **Config negotiation non-compliance** (§1.7) tripping a decoder watchdog.
 
 ---
@@ -296,9 +355,12 @@ Ordered by value.
    longer corrupt. Check `focusSuppressed=` appears in the log on reverse.
 4. **🟡 Gate the TCP/DHU fallback** so it isn't attempted on a real device
    (§3.3). USB-only by default, fallback behind a setting.
-5. **🟡 Test real MediaProjection** instead of the static test pattern — event
-   capture with genuine (but sparse) UI changes.
-6. **🟡 Send `VIDEO_FOCUS_REQUEST` (0x8007) after connect** — we never do.
+5. **✅ Test real MediaProjection** (§1.13) — done 2026-11-02. Real capture
+   works; CBR + a ~12 fps wire cap keep it within budget. *Remaining:* test that
+   it survives a 30+ min run, and confirm the "too much data" first-connect drop
+   seen on 2026-11-02 is gone.
+6. **✅ Send `VIDEO_FOCUS_REQUEST` (0x8007) after connect** — done: we send it on
+   focus regain, together with an encoder sync-frame request (§1.8).
 7. **🟡 Confirm which accepted sensors actually deliver** (§5.2) — the 2026-10-23
    probe showed 8 accepted but only 2 observed delivering, and 6 parsers were
    silent so we cannot tell. All parsers now log; one run settles it.
@@ -561,13 +623,17 @@ PARKING_BRAKE, DRIVING_STATUS, NIGHT_DATA — 7 types with real data.
   `VIDEO_FOCUS_NOTIFICATION: mode=`, codec config, flow control.
 - `AASensor:` — decoded sensor values.
 - `HEALTH:` every 5 s — pings, silence, backlog, inbound/ack histograms.
-- `HEALTH video:` — frames/bytes sent vs acked, unacked, `focusSuppressed`.
+- `HEALTH video:` — frames/bytes sent vs acked, unacked, `focusSuppressed`,
+  `rateCapped` (frames dropped by the real-capture wire cap, §1.13).
 - `PING:` / `STALL:` — warnings when the HU goes quiet (2 s threshold; the old
   500 ms threshold false-positived against the ~790 ms idle cadence).
 - `PONG:` — ping RTT.
 - `TEARDOWN:` — final silence, backlog, ping/pong totals, last inbound.
 - `SUMMARY[where] video budget:` — frames/bytes sent vs acked, unacked,
-  `focusSuppressed` (§6.1b).
+  `focusSuppressed`, `rateCapped` (§6.1b).
+- `AAVideo: startEncoding: screen capture|test pattern (…)`,
+  `applyProjection: switching live video source → screen capture` — which source
+  the encoder is using, and a hot source swap (§1.13).
 - `SUMMARY[where] sensor lifecycle:` — requested / accepted / deliveredData /
   acceptedButSilent / noData (§6.1b).
 - `FIRST DATA for <TYPE>` — first time each sensor type delivers.
@@ -584,6 +650,11 @@ gap > 1200ms → HU drop   |   gap < 1200ms → cable pull
 grep "HEALTH video" log | tail
 # focus (reversing camera)
 grep "VIDEO_FOCUS\|focusSuppressed" log
+# real screen capture: source selection, rate cap, frame sizes (§1.13)
+grep "startEncoding\|applyProjection\|rateCapped" log
+grep "len=" log | awk '{print $NF}' | sort -n | tail   # largest frame sizes
+# early HU rejection: late connect (§1.12)
+grep "Unknown 0x00FF" log
 ```
 
 ---

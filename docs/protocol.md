@@ -344,7 +344,10 @@ The HU tolerates it (video displays), but it is not compliant. See
 The HU owns the display. When it sends **UNFOCUSED** (e.g. reversing camera) the
 phone **must stop sending frames** or it corrupts whatever the HU is showing.
 Our symptom was visible digital corruption of the reversing-camera image.
-Implemented: frames are gated on a `videoFocusHeld` flag.
+Implemented: frames are gated on a `videoFocusHeld` flag. On regaining focus we
+also send `VIDEO_FOCUS_REQUEST` (0x8007, `focus_mode=FOCUSED`) and request an
+encoder IDR so the HU decoder resyncs at once
+(`VideoFocusRequest{ disp_index=1, focus_mode=2 required, focus_reason=3 required }`).
 
 ### 6.4 Flow control
 `0x8004` `AVMediaAckIndication { session=1; value=2; }`. `value` is a
@@ -359,6 +362,13 @@ H.264 **Baseline Profile**, level 3.1, I+P frames only (no B-frames). HUIG:
 updates** ("does not send frames when no updates are available"), plus enough
 idle frames to satisfy the HU's decoder depth. See `connection-stability.md`
 §1.9 — we now do this.
+
+**Bitrate mode matters for real capture.** For live screen capture the encoder
+must be set to `KEY_BITRATE_MODE = BITRATE_MODE_CBR`; left unset, MediaCodec is
+quality-driven and emits frames far over the requested bitrate (up to ~176 KB
+per frame observed) which makes the HU drop the link within seconds. Non-keyframe
+output is also capped on the wire (~12 fps; keyframes pass) — see
+`connection-stability.md` §1.13.
 
 ---
 
