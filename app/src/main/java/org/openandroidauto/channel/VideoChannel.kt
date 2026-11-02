@@ -221,8 +221,13 @@ class VideoChannel(
                     sendStart()
                 } else {
                     // Re-gained focus mid-session (e.g. reversing camera ended).
-                    // Nothing to re-send: the encoder loop resumes from the flag.
-                    FileLogger.w(TAG, "Video focus regained — resuming frame output")
+                    // Unpausing the encoder alone was not enough on the tested HU: it
+                    // stopped showing our stream after the reversing overlay and did not
+                    // switch back. Actively re-claim focus and force an IDR so the HU
+                    // decoder resyncs, then resume frame output. See docs TODO 6.
+                    FileLogger.w(TAG, "Video focus regained — re-claiming focus + forcing keyframe")
+                    requestVideoFocus()
+                    requestKeyframe()
                 }
             }
             2 -> { // UNFOCUSED — HU has taken the screen; STOP sending immediately
@@ -236,6 +241,32 @@ class VideoChannel(
         // Phone receives focus request - respond with focus indication
         val indication = byteArrayOf(0x08, 0x01, 0x10, 0x00) // PROJECTED, unsolicited=false
         sendMessage(AVMessageType.VIDEO_FOCUS_INDICATION, indication)
+    }
+
+    /**
+     * Ask the HU for the primary display (VIDEO_FOCUS_REQUEST 0x8007). Needed to
+     * take the screen back after the HU yields it (e.g. once the reversing camera
+     * ends) — just unpausing the encoder was not enough on the tested HU.
+     * VideoFocusRequest{ focus_mode(2)=FOCUSED(1), focus_reason(3)=NONE(0) }.
+     */
+    private fun requestVideoFocus() {
+        sendMessage(AVMessageType.VIDEO_FOCUS_REQUEST, byteArrayOf(0x10, 0x01, 0x18, 0x00))
+        FileLogger.w(TAG, "Sent VIDEO_FOCUS_REQUEST (focus_mode=FOCUSED)")
+    }
+
+    /**
+     * Force the encoder to emit an IDR (SPS+PPS+keyframe) on the next output so the
+     * HU decoder can resync after an interruption (e.g. the reversing-camera overlay).
+     */
+    private fun requestKeyframe() {
+        try {
+            encoder?.setParameters(android.os.Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            })
+            FileLogger.w(TAG, "Requested encoder sync frame (IDR)")
+        } catch (e: Exception) {
+            FileLogger.w(TAG, "requestKeyframe failed: ${e.message}")
+        }
     }
 
     private fun handleStartIndication(payload: ByteArray) {
@@ -252,9 +283,18 @@ class VideoChannel(
 
     private fun startEncoding() {
         if (running) return
-        // Use test pattern mode - generates valid H.264 at exact 30fps
-        // This bypasses MediaProjection to isolate video stability issues
-        startTestPatternEncoding()
+        // Screen capture is the default; the diagnostic test pattern is opt-in via
+        // the UI toggle. If no MediaProjection was obtained (e.g. the service was
+        // auto-started without the consent flow) fall back to the test pattern so
+        // video still starts rather than nothing.
+        if (!ServiceState.testPatternEnabled.value && mediaProjection != null) {
+            FileLogger.w(TAG, "startEncoding: screen capture (MediaProjection available)")
+            startRealEncoding()
+        } else {
+            FileLogger.w(TAG, "startEncoding: test pattern (testPatternEnabled=" +
+                "${ServiceState.testPatternEnabled.value}, projection=${mediaProjection != null})")
+            startTestPatternEncoding()
+        }
     }
 
     /**
