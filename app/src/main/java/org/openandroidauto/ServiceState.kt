@@ -30,6 +30,10 @@ object ServiceState {
     // when content actually changes, plus periodic idle frames to satisfy the
     // HU decoder pipeline depth. See docs/connection-stability.md §10.
     val eventDrivenVideo = MutableStateFlow(true)
+    // Experiment (docs §5): subscribe to ALL sensor types to discover what this
+    // HU actually exposes, rather than assuming most are unavailable. Off by
+    // default so normal runs stay clean.
+    val probeAllSensors = MutableStateFlow(false)
 
     // Sensor data from head unit
     data class LocationData(val lat: Double = 0.0, val lon: Double = 0.0, val accuracy: Double = 0.0,
@@ -38,6 +42,14 @@ object ServiceState {
     data class FuelData(val level: Int = -1, val range: Int = -1, val lowFuel: Boolean = false)
     data class LightData(val headlight: Int = 0, val indicator: Int = 0, val hazard: Boolean = false)
     data class Vec3(val x: Double = 0.0, val y: Double = 0.0, val z: Double = 0.0)
+    /** Door.proto: hood_open=1, boot_open=2, repeated door_open=3 */
+    data class DoorData(
+        val hoodOpen: Boolean = false,
+        val bootOpen: Boolean = false,
+        val doors: List<Boolean> = emptyList()
+    ) {
+        val anyOpen: Boolean get() = hoodOpen || bootOpen || doors.any { it }
+    }
     data class GpsSatData(val inUse: Int = 0, val inView: Int = 0)
 
     val sensorNightMode = MutableStateFlow(false)
@@ -58,6 +70,16 @@ object ServiceState {
     val sensorAccel = MutableStateFlow(Vec3())
     val sensorGyro = MutableStateFlow(Vec3())
     val sensorGpsSats = MutableStateFlow(GpsSatData())
+    val sensorDoors = MutableStateFlow(DoorData())
+    val sensorPressure = MutableStateFlow(0.0)   // kPa, env pressure field
+    val sensorRain = MutableStateFlow(0)         // raw env rain field
+    val sensorSteeringAngle = MutableStateFlow(0.0)
+    val sensorSteeringWheelSpeed = MutableStateFlow(0.0)
+
+    /** Which sensor types this HU accepted a subscription for (status OK). */
+    val sensorsAccepted = MutableStateFlow<Set<Int>>(emptySet())
+    /** Which sensor types have actually delivered data at least once. */
+    val sensorsWithData = MutableStateFlow<Set<Int>>(emptySet())
 
     fun init(context: Context) {
         prefs = context.applicationContext.getSharedPreferences("aa_settings", Context.MODE_PRIVATE)
@@ -67,6 +89,7 @@ object ServiceState {
             fragmentEnabled.value = p.getBoolean("fragment", false)
             testPatternEnabled.value = p.getBoolean("testPattern", true)
             eventDrivenVideo.value = p.getBoolean("eventDrivenVideo", true)
+            probeAllSensors.value = p.getBoolean("probeAllSensors", false)
         }
     }
 
@@ -77,6 +100,7 @@ object ServiceState {
             ?.putBoolean("fragment", fragmentEnabled.value)
             ?.putBoolean("testPattern", testPatternEnabled.value)
             ?.putBoolean("eventDrivenVideo", eventDrivenVideo.value)
+            ?.putBoolean("probeAllSensors", probeAllSensors.value)
             ?.apply()
     }
 

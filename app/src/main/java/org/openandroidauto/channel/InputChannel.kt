@@ -1,5 +1,7 @@
 package org.openandroidauto.channel
 
+import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -82,10 +84,15 @@ class InputChannel(
     private val targetWidth: Int = 1280,
     private val targetHeight: Int = 720
 ) {
+    private val TAG = "AAInput"
+
     fun onMessage(messageType: Int, payload: ByteArray) {
         when (messageType) {
             InputMessageType.INPUT_EVENT_INDICATION -> handleInputEvent(payload)
             InputMessageType.BINDING_REQUEST -> handleBindingRequest(payload)
+            // Previously had no else: unhandled input messages vanished silently.
+            else -> FileLogger.w(TAG, "UNHANDLED input(ch$channelId) message type=0x" +
+                "${messageType.toString(16)} len=${payload.size} payload=${payload.hex(64)}")
         }
     }
 

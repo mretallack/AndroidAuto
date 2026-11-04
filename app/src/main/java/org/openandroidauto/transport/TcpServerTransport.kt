@@ -3,6 +3,8 @@ package org.openandroidauto.transport
 import org.openandroidauto.util.FileLogger
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InputStream
@@ -37,14 +39,38 @@ class TcpServerTransport(private val port: Int = 5277) : Transport {
         server.reuseAddress = true
         server.bind(java.net.InetSocketAddress(port))
         serverSocket = server
-        // accept() must not block forever: if no DHU connects we want the attempt
-        // to fail so the reconnect loop / watchdog can move on. 15s poll loop lets
-        // a concurrent disconnect() (which closes the server socket) unblock us.
-        val client = try {
-            server.accept()
-        } catch (e: Exception) {
-            serverSocket = null
-            throw java.io.IOException("accept failed/cancelled: ${e.message}", e)
+        // accept() must NOT block indefinitely: if no DHU/consumer connects we want
+        // the attempt to fail so the reconnect loop / watchdog can move on.
+        // Previously this was a plain blocking accept() and, because `transport`
+        // was not assigned until after connect() returned, the watchdog could not
+        // close it — so it blocked for 12 minutes (observed 2026-10-19) and then
+        // held port 5277, causing EADDRINUSE on the next attempt.
+        //
+        // We poll with a short SO_TIMEOUT and a hard deadline, checking coroutine
+        // cancellation each iteration. A concurrent disconnect() (which closes
+        // serverSocket) also unblocks it immediately.
+        val acceptTimeoutMs = 10_000
+        val pollMs = 500
+        server.soTimeout = pollMs
+        val deadline = System.currentTimeMillis() + acceptTimeoutMs
+        var client: Socket? = null
+        while (client == null) {
+            if (!kotlinx.coroutines.currentCoroutineContext().isActive) {
+                serverSocket = null
+                throw java.io.IOException("accept cancelled")
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                serverSocket = null
+                throw java.io.IOException("accept timed out after ${acceptTimeoutMs}ms (no client)")
+            }
+            client = try {
+                server.accept()
+            } catch (_: java.net.SocketTimeoutException) {
+                null // poll: re-check cancellation/deadline
+            } catch (e: Exception) {
+                serverSocket = null
+                throw java.io.IOException("accept failed/cancelled: ${e.message}", e)
+            }
         }
         synchronized(lock) {
             client.soTimeout = 10000 // 10 second read timeout

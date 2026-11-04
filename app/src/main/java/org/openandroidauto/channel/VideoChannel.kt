@@ -1,6 +1,7 @@
 package org.openandroidauto.channel
 
 import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -12,6 +13,9 @@ import org.openandroidauto.ServiceState
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+
+/** Minimum gap between forwarded non-keyframes for real screen capture (~12 fps). */
+private const val REAL_CAPTURE_MIN_FRAME_INTERVAL_MS = 80L
 
 object AVMessageType {
     const val AV_MEDIA_WITH_TIMESTAMP: Int = 0x0000
@@ -85,11 +89,66 @@ class VideoChannel(
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
     private var running = false
+    /**
+     * True when the encoder is fed by real screen capture (MediaProjection) as
+     * opposed to the test pattern. Real capture produces display-rate output
+     * (30-60 fps); the HU drops the link within seconds under that load (observed
+     * 2026-11-02: screen capture died in ~3 s vs minutes for the ~1 fps test
+     * pattern). Non-keyframes are therefore rate-capped on the wire.
+     */
+    @Volatile private var screenCaptureSource = false
     private var unackedFrames = 0
     private val unackedLock = Object()
 
+    /**
+     * Video focus state. The HU owns the screen and tells us when it wants it back
+     * via VIDEO_FOCUS_NOTIFICATION (0x8008): FOCUSED(1) or UNFOCUSED(2). When it
+     * takes the display (e.g. the reversing camera) we MUST stop sending frames —
+     * otherwise our H.264 stream corrupts whatever the HU is showing. Symptom
+     * before this fix: digital corruption of the reversing-camera image
+     * (observed 2026-10-19, HUIG: MD yields video focus on revocation).
+     */
+    @Volatile private var videoFocusHeld = false
+    private val videoFocusLock = Object()
+
     fun setMediaProjection(projection: MediaProjection) {
         mediaProjection = projection
+    }
+
+    /**
+     * Adopt a MediaProjection that arrived after this channel already exists. The
+     * service can auto-start (test pattern) before the user grants capture consent,
+     * so the projection may land late — possibly while the test pattern is already
+     * streaming. If so, restart the encoder on the real screen source, preserving
+     * the video session's focus/state.
+     */
+    fun applyProjection(projection: MediaProjection) {
+        mediaProjection = projection
+        if (!running) {
+            FileLogger.w(TAG, "applyProjection: no encoding yet — screen capture used on START")
+            return
+        }
+        FileLogger.w(TAG, "applyProjection: switching live video source → screen capture")
+        val wasState = state
+        val wasFocus = synchronized(videoFocusLock) { videoFocusHeld }
+        stopEncoderOnly()
+        // Preserve session focus/state across the source swap.
+        synchronized(videoFocusLock) { videoFocusHeld = wasFocus }
+        state = if (wasState == VideoState.IDLE) VideoState.STARTED else wasState
+        startRealEncoding()
+    }
+
+    /** Tear down just the encoder/threads; session state and focus are left intact. */
+    private fun stopEncoderOnly() {
+        running = false
+        // Let the draw/output threads observe running=false and exit before the
+        // surface fields are re-created for the new source (otherwise the old
+        // test-pattern draw thread could paint over the real screen surface).
+        try { Thread.sleep(80) } catch (_: InterruptedException) {}
+        try { encoder?.stop() } catch (_: Exception) {}
+        encoder?.release(); encoder = null
+        inputSurface?.release(); inputSurface = null
+        virtualDisplay?.release(); virtualDisplay = null
     }
 
     fun onMessage(messageType: Int, payload: ByteArray) {
@@ -101,7 +160,8 @@ class VideoChannel(
             AVMessageType.VIDEO_FOCUS_REQUEST -> handleVideoFocusRequest(payload)
             AVMessageType.VIDEO_FOCUS_INDICATION -> handleVideoFocusIndication(payload)
             AVMessageType.AV_MEDIA_ACK -> handleMediaAck(payload)
-            else -> FileLogger.w(TAG, "Unknown video message: 0x${messageType.toString(16)}")
+            else -> FileLogger.w(TAG, "UNHANDLED video message type=0x${messageType.toString(16)} " +
+                "len=${payload.size} payload=${payload.hex(64)}")
         }
     }
 
@@ -128,6 +188,7 @@ class VideoChannel(
 
     fun stop() {
         running = false
+        synchronized(videoFocusLock) { videoFocusHeld = false }
         encoder?.stop()
         encoder?.release()
         encoder = null
@@ -197,11 +258,29 @@ class VideoChannel(
             }
             if (field == 1) focusMode = value
         }
-        FileLogger.w(TAG, "VIDEO_FOCUS_NOTIFICATION: mode=$focusMode (1=PROJECTED)")
-        if (focusMode == 1 && (state == VideoState.CONFIGURED || state == VideoState.SETUP_SENT)) {
-            state = VideoState.FOCUSED
-            // We have focus - send START
-            sendStart()
+        // VideoFocusMode: NONE=0, FOCUSED=1, UNFOCUSED=2
+        FileLogger.w(TAG, "VIDEO_FOCUS_NOTIFICATION: mode=$focusMode (1=FOCUSED, 2=UNFOCUSED)")
+        when (focusMode) {
+            1 -> { // FOCUSED — we own the screen
+                synchronized(videoFocusLock) { videoFocusHeld = true }
+                if (state == VideoState.CONFIGURED || state == VideoState.SETUP_SENT) {
+                    state = VideoState.FOCUSED
+                    sendStart()
+                } else {
+                    // Re-gained focus mid-session (e.g. reversing camera ended).
+                    // Unpausing the encoder alone was not enough on the tested HU: it
+                    // stopped showing our stream after the reversing overlay and did not
+                    // switch back. Actively re-claim focus and force an IDR so the HU
+                    // decoder resyncs, then resume frame output. See docs TODO 6.
+                    FileLogger.w(TAG, "Video focus regained — re-claiming focus + forcing keyframe")
+                    requestVideoFocus()
+                    requestKeyframe()
+                }
+            }
+            2 -> { // UNFOCUSED — HU has taken the screen; STOP sending immediately
+                synchronized(videoFocusLock) { videoFocusHeld = false }
+                FileLogger.w(TAG, "Video focus lost — pausing frame output (HU owns the screen)")
+            }
         }
     }
 
@@ -209,6 +288,32 @@ class VideoChannel(
         // Phone receives focus request - respond with focus indication
         val indication = byteArrayOf(0x08, 0x01, 0x10, 0x00) // PROJECTED, unsolicited=false
         sendMessage(AVMessageType.VIDEO_FOCUS_INDICATION, indication)
+    }
+
+    /**
+     * Ask the HU for the primary display (VIDEO_FOCUS_REQUEST 0x8007). Needed to
+     * take the screen back after the HU yields it (e.g. once the reversing camera
+     * ends) — just unpausing the encoder was not enough on the tested HU.
+     * VideoFocusRequest{ focus_mode(2)=FOCUSED(1), focus_reason(3)=NONE(0) }.
+     */
+    private fun requestVideoFocus() {
+        sendMessage(AVMessageType.VIDEO_FOCUS_REQUEST, byteArrayOf(0x10, 0x01, 0x18, 0x00))
+        FileLogger.w(TAG, "Sent VIDEO_FOCUS_REQUEST (focus_mode=FOCUSED)")
+    }
+
+    /**
+     * Force the encoder to emit an IDR (SPS+PPS+keyframe) on the next output so the
+     * HU decoder can resync after an interruption (e.g. the reversing-camera overlay).
+     */
+    private fun requestKeyframe() {
+        try {
+            encoder?.setParameters(android.os.Bundle().apply {
+                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+            })
+            FileLogger.w(TAG, "Requested encoder sync frame (IDR)")
+        } catch (e: Exception) {
+            FileLogger.w(TAG, "requestKeyframe failed: ${e.message}")
+        }
     }
 
     private fun handleStartIndication(payload: ByteArray) {
@@ -225,9 +330,18 @@ class VideoChannel(
 
     private fun startEncoding() {
         if (running) return
-        // Use test pattern mode - generates valid H.264 at exact 30fps
-        // This bypasses MediaProjection to isolate video stability issues
-        startTestPatternEncoding()
+        // Screen capture is the default; the diagnostic test pattern is opt-in via
+        // the UI toggle. If no MediaProjection was obtained (e.g. the service was
+        // auto-started without the consent flow) fall back to the test pattern so
+        // video still starts rather than nothing.
+        if (!ServiceState.testPatternEnabled.value && mediaProjection != null) {
+            FileLogger.w(TAG, "startEncoding: screen capture (MediaProjection available)")
+            startRealEncoding()
+        } else {
+            FileLogger.w(TAG, "startEncoding: test pattern (testPatternEnabled=" +
+                "${ServiceState.testPatternEnabled.value}, projection=${mediaProjection != null})")
+            startTestPatternEncoding()
+        }
     }
 
     /**
@@ -235,6 +349,7 @@ class VideoChannel(
      * Produces valid H.264 Baseline at exact 30fps without needing MediaProjection.
      */
     private fun startTestPatternEncoding() {
+        screenCaptureSource = false
         try {
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, config.width, config.height).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
@@ -330,6 +445,7 @@ class VideoChannel(
 
     private fun startRealEncoding() {
         val projection = mediaProjection ?: return
+        screenCaptureSource = true
         try {
             projection.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
@@ -340,6 +456,12 @@ class VideoChannel(
 
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, config.width, config.height).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
+                // Constrain the encoder to a real bitrate. Without an explicit mode
+                // MediaCodec runs quality-driven and emits huge frames (up to ~176 KB
+                // observed 2026-11-02), overshooting the 250 kbps target ~3x and
+                // tripping the HU's link drop within seconds.
+                setInteger(MediaFormat.KEY_BITRATE_MODE,
+                    MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
                 setInteger(MediaFormat.KEY_FRAME_RATE, config.fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -415,6 +537,7 @@ class VideoChannel(
             val bufferInfo = MediaCodec.BufferInfo()
             var firstTimestampUs = -1L
             var codecConfig: ByteArray? = null
+            var lastForwardMs = 0L
             while (running) {
                 val codec = encoder ?: break
                 val index = codec.dequeueOutputBuffer(bufferInfo, 10_000)
@@ -434,13 +557,23 @@ class VideoChannel(
                         if (firstTimestampUs < 0) firstTimestampUs = bufferInfo.presentationTimeUs
                         val relativeTimestampUs = bufferInfo.presentationTimeUs - firstTimestampUs
 
+                        val isKey = bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
                         val annexBData = ensureAnnexB(data)
-                        val frameData = if (codecConfig != null &&
-                            (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)) {
+                        val frameData = if (codecConfig != null && isKey) {
                             codecConfig!! + annexBData
                         } else annexBData
 
-                        sendVideoFrame(frameData, relativeTimestampUs)
+                        // Rate-cap real screen capture on the wire: forward at most
+                        // ~12 fps of non-keyframes (keyframes always pass so the HU
+                        // decoder can resync). The test pattern is already event-driven.
+                        val now = System.currentTimeMillis()
+                        if (screenCaptureSource && !isKey &&
+                            now - lastForwardMs < REAL_CAPTURE_MIN_FRAME_INTERVAL_MS) {
+                            framesRateCapped++
+                        } else {
+                            lastForwardMs = now
+                            sendVideoFrame(frameData, relativeTimestampUs)
+                        }
                     }
                     codec.releaseOutputBuffer(index, false)
                 }
@@ -499,6 +632,8 @@ class VideoChannel(
     fun budgetSummary(): String =
         "videoFramesSent=$framesSent videoBytesSent=$bytesSent " +
         "videoFramesAcked=$framesAcked videoBytesAcked=$bytesAcked " +
+        "focusSuppressed=$framesSuppressedForFocus focusHeld=$videoFocusHeld " +
+        "rateCapped=$framesRateCapped " +
         "unacked=$unackedFrames maxUnacked=$maxUnacked"
 
     private fun handleMediaAck(payload: ByteArray) {
@@ -517,8 +652,22 @@ class VideoChannel(
     @Volatile var bytesSent: Long = 0L; private set
     @Volatile var framesAcked: Long = 0L; private set
     @Volatile var bytesAcked: Long = 0L; private set
+    /** Frames dropped because the HU held video focus (e.g. reversing camera). */
+    @Volatile var framesSuppressedForFocus: Long = 0L; private set
+    /** Frames dropped by the real-capture wire rate cap (see sendVideoFrame path). */
+    @Volatile var framesRateCapped: Long = 0L; private set
+
+    /** Test seam: lets unit tests drive the focus gate directly. */
+    internal fun sendVideoFrameForTest(nalData: ByteArray, timestampUs: Long) =
+        sendVideoFrame(nalData, timestampUs)
 
     private fun sendVideoFrame(nalData: ByteArray, timestampUs: Long) {
+        // Yield the screen while the HU has taken video focus (reversing camera,
+        // native UI, etc). Sending frames then corrupts what the HU is displaying.
+        if (!videoFocusHeld) {
+            framesSuppressedForFocus++
+            return
+        }
         framesSent++
         bytesSent += nalData.size
         // Flow control: wait if too many unacked frames

@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import org.openandroidauto.channel.SensorType
 import org.openandroidauto.transport.UsbAoaTransport
 
 class MainActivity : AppCompatActivity() {
@@ -120,11 +121,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkAutoStart() {
-        // Auto-start if USB accessory is connected
+        // Connect to the head unit as soon as the USB accessory appears. The HU
+        // starts its AA session only once, on attach, and rejects a late
+        // VERSION_REQUEST with MESSAGE_UNEXPECTED_MESSAGE (0x00FF) — so we must be
+        // connected promptly, BEFORE the user finishes the MediaProjection consent
+        // flow. Auto-start therefore is NOT gated on the video mode.
         val accessory = UsbAoaTransport.findAccessory(this)
         if (accessory != null && !serviceStarted) {
             ServiceState.addEvent("Auto-starting (USB detected)")
             startService()
+            // In screen-capture mode, request consent now and deliver the projection
+            // to the already-running service, which swaps the live video source on
+            // receipt (see ProjectionService.onStartCommand / VideoChannel.applyProjection).
+            if (!ServiceState.testPatternEnabled.value) {
+                val pm = getSystemService(MediaProjectionManager::class.java)
+                screenCaptureLauncher.launch(pm.createScreenCaptureIntent())
+            }
         }
     }
 
@@ -172,24 +184,123 @@ class MainActivity : AppCompatActivity() {
             while (true) {
                 kotlinx.coroutines.delay(1000)
                 val sb = StringBuilder()
-                val ds = ServiceState.sensorDrivingStatus.value
-                val dsText = if (ds == 0) "UNRESTRICTED" else "RESTRICTED($ds)"
-                sb.appendLine("Mode: ${if (ServiceState.sensorNightMode.value) "NIGHT" else "DAY"}  Drive: $dsText")
+
+                // Every field is ALWAYS listed so the state of each is visible:
+                // a value, "not received" (subscribed, HU silent), "off/none"
+                // where that is meaningful, or "HU rejects".
+                val accepted = ServiceState.sensorsAccepted.value
+                val withData = ServiceState.sensorsWithData.value
+                val probed = ServiceState.sensorsAccepted.value.isNotEmpty()
+
+                /** Status suffix for a type: not requested / rejected / silent / live. */
+                fun status(type: Int): String = when {
+                    !probed -> ""
+                    type in withData -> ""
+                    type in accepted -> "  [subscribed, no data]"
+                    else -> "  [HU rejects]"
+                }
+
+                /**
+                 * Render a row. [value] null means we have no reading for it.
+                 * Distinguish "no reading" from "reading is genuinely zero/false"
+                 * by checking whether the type is known to be delivering.
+                 */
+                fun row(label: String, type: Int, value: String?) {
+                    val st = status(type)
+                    val v = when {
+                        value != null -> value
+                        type in withData -> "no reading"
+                        else -> "not received"
+                    }
+                    sb.appendLine("$label: $v$st")
+                }
+
+                sb.appendLine("— Mode & status —")
+                sb.appendLine("Mode: ${if (ServiceState.sensorNightMode.value) "NIGHT" else "DAY"}" +
+                    status(SensorType.NIGHT_MODE))
+                sb.appendLine("Driving: ${drivingStatusText(ServiceState.sensorDrivingStatus.value)}" +
+                    status(SensorType.DRIVING_STATUS))
+
+                sb.appendLine("— Navigation —")
                 val loc = ServiceState.sensorLocation.value
-                if (loc.lat != 0.0 || loc.lon != 0.0)
-                    sb.appendLine("GPS: %.5f, %.5f  ±%.0fm".format(loc.lat, loc.lon, loc.accuracy))
+                row("GPS", SensorType.LOCATION,
+                    if (loc.lat != 0.0 || loc.lon != 0.0)
+                        "%.5f, %.5f  ±%.0fm  alt %.0fm  brg %.0f°".format(
+                            loc.lat, loc.lon, loc.accuracy, loc.altitude, loc.bearing) else null)
+                val sats = ServiceState.sensorGpsSats.value
+                row("Sats", SensorType.GPS_SATELLITE,
+                    if (sats.inUse > 0 || sats.inView > 0) "${sats.inUse} used / ${sats.inView} in view" else null)
+                row("Compass", SensorType.COMPASS,
+                    if (ServiceState.sensorCompass.value != 0.0) "%.0f°".format(ServiceState.sensorCompass.value) else null)
+
+                sb.appendLine("— Powertrain —")
                 val spd = ServiceState.sensorSpeed.value
-                if (spd > 0) sb.appendLine("Speed: %.0f km/h".format(spd * 3.6))
+                row("Speed", SensorType.SPEED, if (spd > 0) "%.0f km/h".format(spd * 3.6) else null)
                 val rpm = ServiceState.sensorRpm.value
-                if (rpm > 0) sb.appendLine("RPM: %.0f".format(rpm))
+                row("RPM", SensorType.RPM, if (rpm > 0) "%.0f".format(rpm) else null)
                 val gear = ServiceState.sensorGear.value
-                if (gear != 0) sb.appendLine("Gear: ${when(gear) { 100->"D"; 101->"P"; 102->"R"; 0->"N"; else->"$gear" }}")
+                row("Gear", SensorType.GEAR, if (gear != 0) gearText(gear) else null)
                 val fuel = ServiceState.sensorFuel.value
-                if (fuel.level >= 0) sb.appendLine("Fuel: ${fuel.level}%  Range: ${fuel.range}km")
-                if (ServiceState.sensorParkingBrake.value) sb.appendLine("⚠ Parking brake ON")
+                row("Fuel", SensorType.FUEL,
+                    if (fuel.level >= 0) "${fuel.level}%" +
+                        (if (fuel.range >= 0) "  Range: ${fuel.range} km" else "") +
+                        (if (fuel.lowFuel) "  ⚠ LOW" else "") else null)
+                val odo = ServiceState.sensorOdometer.value
+                row("Odometer", SensorType.ODOMETER,
+                    if (odo.kms > 0) "%.1f km (trip %.1f)".format(odo.kms, odo.tripKms) else null)
+
+                sb.appendLine("— Vehicle state —")
+                row("Parking brake", SensorType.PARKING_BRAKE,
+                    if (SensorType.PARKING_BRAKE in withData)
+                        (if (ServiceState.sensorParkingBrake.value) "ON" else "off") else null)
+                val doors = ServiceState.sensorDoors.value
+                val doorsOpen = buildList {
+                    if (doors.hoodOpen) add("hood")
+                    if (doors.bootOpen) add("boot")
+                    doors.doors.forEachIndexed { i, o -> if (o) add("door${i + 1}") }
+                }
+                row("Doors", SensorType.DOOR,
+                    if (doors.doors.isNotEmpty()) (if (doorsOpen.isEmpty()) "all closed" else doorsOpen.joinToString(", ") + " OPEN") else null)
+                val lights = ServiceState.sensorLights.value
+                row("Lights", SensorType.LIGHT,
+                    if (lights.headlight != 0 || lights.hazard)
+                        headlightText(lights.headlight) + (if (lights.hazard) "  ⚠ HAZARD" else "") else null)
+
+                sb.appendLine("— Climate / environment —")
                 val temp = ServiceState.sensorTemperature.value
-                if (temp != 0.0) sb.appendLine("Temp: %.1f°C".format(temp))
-                tvSensorData.text = if (sb.isEmpty()) "Waiting for sensor data..." else sb.toString().trim()
+                row("Temp", SensorType.ENVIRONMENT, if (temp != 0.0) "%.1f°C".format(temp) else null)
+                row("Pressure", SensorType.ENVIRONMENT,
+                    if (ServiceState.sensorPressure.value != 0.0) "%.1f kPa".format(ServiceState.sensorPressure.value) else null)
+                val hvacT = ServiceState.sensorHvacTarget.value
+                row("HVAC", SensorType.HVAC,
+                    if (hvacT != 0.0) "target %.1f°C  current %.1f°C".format(hvacT, ServiceState.sensorHvacCurrent.value) else null)
+
+                sb.appendLine("— Motion / occupancy —")
+                val st = ServiceState.sensorSteeringAngle.value
+                row("Steering", SensorType.DEAD_RECKONING, if (st != 0.0) "%.1f°".format(st) else null)
+                val acc = ServiceState.sensorAccel.value
+                row("Accel", SensorType.ACCELEROMETER,
+                    if (acc.x != 0.0 || acc.y != 0.0 || acc.z != 0.0) "%.2f, %.2f, %.2f m/s²".format(acc.x, acc.y, acc.z) else null)
+                val gyro = ServiceState.sensorGyro.value
+                row("Gyro", SensorType.GYROSCOPE,
+                    if (gyro.x != 0.0 || gyro.y != 0.0 || gyro.z != 0.0) "%.2f, %.2f, %.2f rad/s".format(gyro.x, gyro.y, gyro.z) else null)
+                row("Passenger", SensorType.PASSENGER,
+                    if (SensorType.PASSENGER in withData)
+                        (if (ServiceState.sensorPassenger.value) "present" else "none") else null)
+
+                // Summary of what the HU is actually giving us
+                if (probed) {
+                    sb.appendLine("—")
+                    sb.appendLine("HU accepts: ${accepted.sorted().joinToString(",") { SensorNames.short(it) }}")
+                    val silent = accepted - withData
+                    sb.appendLine("Accepted but silent: " +
+                        if (silent.isEmpty()) "none" else silent.sorted().joinToString(",") { SensorNames.short(it) })
+                } else {
+                    sb.appendLine("—")
+                    sb.appendLine("(enable 'Probe All Sensors' to see what the HU accepts)")
+                }
+
+                tvSensorData.text = sb.toString().trim()
             }
         }
 
@@ -217,24 +328,26 @@ class MainActivity : AppCompatActivity() {
         swTestPattern.isChecked = ServiceState.testPatternEnabled.value
         val swEventDriven = findViewById<Switch>(R.id.swEventDriven)
         swEventDriven.isChecked = ServiceState.eventDrivenVideo.value
+        val swProbeSensors = findViewById<Switch>(R.id.swProbeSensors)
+        swProbeSensors.isChecked = ServiceState.probeAllSensors.value
 
         swAudio.setOnCheckedChangeListener { _, checked -> ServiceState.audioEnabled.value = checked; ServiceState.saveSettings() }
         swSensor.setOnCheckedChangeListener { _, checked -> ServiceState.sensorEnabled.value = checked; ServiceState.saveSettings() }
         swFragment.setOnCheckedChangeListener { _, checked -> ServiceState.fragmentEnabled.value = checked; ServiceState.saveSettings() }
         swTestPattern.setOnCheckedChangeListener { _, checked -> ServiceState.testPatternEnabled.value = checked; ServiceState.saveSettings() }
         swEventDriven.setOnCheckedChangeListener { _, checked -> ServiceState.eventDrivenVideo.value = checked; ServiceState.saveSettings() }
+        swProbeSensors.setOnCheckedChangeListener { _, checked -> ServiceState.probeAllSensors.value = checked; ServiceState.saveSettings() }
 
         tvFps.text = "FPS: 15"
         tvBitrate.text = "250 Kbps"
     }
 
     private fun startServiceWithProjection(resultCode: Int, data: Intent) {
-        if (serviceStarted) return
-        if (isProjectionServiceRunning()) {
-            FileLogger.w(TAG, "ProjectionService already running — not starting a second instance")
-            serviceStarted = true
-            return
-        }
+        // Deliver the projection to the service. If an instance is already running
+        // (e.g. auto-started, or the Activity was recreated), startForegroundService
+        // re-enters onStartCommand and the running service adopts the projection —
+        // so we no longer discard it as a "second instance" (that made the Screen
+        // capture option a silent no-op).
         serviceStarted = true
         val serviceIntent = Intent(this, ProjectionService::class.java).apply {
             putExtra(ProjectionService.EXTRA_PROJECTION_RESULT_CODE, resultCode)
@@ -256,6 +369,47 @@ class MainActivity : AppCompatActivity() {
         serviceStarted = true
         startForegroundService(Intent(this, ProjectionService::class.java))
         findViewById<Button>(R.id.btnStartStop).text = "Stop Service"
+    }
+
+    // ── Display helpers for vehicle data ───────────────────────────────────────
+
+    /** Decode DrivingStatusEnum bitmask (mirrors SensorChannel.drivingStatusText). */
+    private fun drivingStatusText(status: Int): String {
+        if (status == 0) return "UNRESTRICTED"
+        if (status == 31) return "FULLY_RESTRICTED"
+        val parts = buildList {
+            if (status and 1 != 0) add("NO_VIDEO")
+            if (status and 2 != 0) add("NO_KEYBOARD")
+            if (status and 4 != 0) add("NO_VOICE")
+            if (status and 8 != 0) add("NO_CONFIG")
+            if (status and 16 != 0) add("LIMIT_MSG_LEN")
+        }
+        return parts.joinToString("|").ifEmpty { "UNKNOWN($status)" }
+    }
+
+    /** GearEnum: 0=NEUTRAL, 1-10 = gears, 100=DRIVE, 101=PARK, 102=REVERSE. */
+    private fun gearText(gear: Int): String = when (gear) {
+        0 -> "N"
+        100 -> "D"
+        101 -> "P"
+        102 -> "R"
+        else -> gear.toString()
+    }
+
+    /** HeadlightStatus enum: 0=NONE, 1=OFF, 2=ON, 3=HIGH. */
+    private fun headlightText(v: Int): String = when (v) {
+        0 -> "n/a"; 1 -> "off"; 2 -> "on"; 3 -> "high beam"; else -> "?"
+    }
+
+    /** Short label for a SensorType value, for the capability footer. */
+    private object SensorNames {
+        fun short(type: Int): String = when (type) {
+            1 -> "GPS"; 2 -> "compass"; 3 -> "speed"; 4 -> "rpm"; 5 -> "odometer"
+            6 -> "fuel"; 7 -> "parkbrake"; 8 -> "gear"; 9 -> "diag"; 10 -> "night"
+            11 -> "env"; 12 -> "hvac"; 13 -> "drive"; 14 -> "steering"; 15 -> "passenger"
+            16 -> "doors"; 17 -> "lights"; 19 -> "accel"; 20 -> "gyro"
+            else -> "t$type"
+        }
     }
 
     private fun isProjectionServiceRunning(): Boolean {

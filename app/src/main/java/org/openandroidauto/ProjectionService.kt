@@ -22,6 +22,7 @@ import org.openandroidauto.transport.TcpTransport
 import org.openandroidauto.transport.Transport
 import org.openandroidauto.transport.UsbAoaTransport
 import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 import java.nio.ByteBuffer
 
 class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, InputChannelCallback, SensorChannelCallback {
@@ -33,12 +34,20 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         private const val FRAGMENT_SIZE = 2048
         const val EXTRA_PROJECTION_RESULT_CODE = "projection_result_code"
         const val EXTRA_PROJECTION_DATA = "projection_data"
+        /** Max bytes of each transport read written to the log (see RAW ← lines). */
+        private const val RAW_LOG_BYTES = 256
+        /** Log every decrypted payload, not just short ones. Verbose; flip off if noisy. */
+        private const val DECRYPT_LOG_ALL = true
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     // Per-attempt job: owns this session's read/write/ping loops so teardown can
     // cancel them before a retry (prevents a stale loop writing to a dead fd).
     private var sessionJob: Job? = null
+    // Outer session loop (one per service instance). Guards against a second
+    // onStartCommand — e.g. a projection delivered to an already-running service —
+    // spawning a duplicate session.
+    private var sessionRunner: Job? = null
     // Set when a session's read loop fails; consumed by sessionWithReconnect.
     @Volatile private var sessionEndReason: String? = null
     private val writeQueue = CoChannel<ByteArray>(capacity = 64)
@@ -164,13 +173,40 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         @Suppress("DEPRECATION")
         val projectionData: Intent? = intent?.getParcelableExtra(EXTRA_PROJECTION_DATA)
         if (resultCode != 0 && projectionData != null) {
+            // Android 14+: the service must already be running as a foreground
+            // service of type mediaProjection before the projection can be obtained,
+            // or getMediaProjection() throws SecurityException. onCreate only started
+            // us as connectedDevice, so promote the foreground-service type here first.
+            startForeground(NOTIFICATION_ID, buildNotification("Screen capture..."),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
             val projectionManager = getSystemService(android.media.projection.MediaProjectionManager::class.java)
-            mediaProjection = projectionManager.getMediaProjection(resultCode, projectionData)
-            logW("MediaProjection obtained successfully")
-        } else {
+            val projection = projectionManager.getMediaProjection(resultCode, projectionData)
+            if (projection != null) {
+                val existing = mediaProjection
+                mediaProjection = projection
+                logW("MediaProjection obtained successfully" +
+                    if (existing != null) " (replacing previous)" else "")
+                if (existing != null && existing !== projection) {
+                    try { existing.stop() } catch (_: Exception) {}
+                }
+                // If the service was already running (auto-started in test-pattern
+                // mode), hand the new projection to the live video channel and let it
+                // switch the source to screen capture.
+                val vc = videoChannel
+                if (vc != null) vc.applyProjection(projection)
+                else logW("Video channel not created yet — screen capture applies on START")
+            } else {
+                logW("MediaProjection request returned null — will send black frames")
+            }
+        } else if (mediaProjection == null) {
             logW("No MediaProjection - will send black frames")
         }
-        scope.launch { sessionWithReconnect(this) }
+        // Only one session loop per service instance. A projection delivered to an
+        // already-running service re-enters onStartCommand and must not start a second.
+        if (sessionRunner?.isActive != true) {
+            sessionRunner = scope.launch { sessionWithReconnect(this) }
+        }
         return START_NOT_STICKY
     }
 
@@ -264,10 +300,27 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         }
     }
 
+    /**
+     * Emit the per-session diagnostic summaries (video budget, sensor lifecycle).
+     * Safe to call more than once per session; each call logs a `where=` marker.
+     */
+    private fun logSessionSummaries(where: String) {
+        videoChannel?.let { logW("SUMMARY[$where] video budget: ${it.budgetSummary()}") }
+        sensorChannel?.let {
+            logW("SUMMARY[$where] sensor lifecycle: ${it.lifecycleSummary()}")
+            logW("SUMMARY[$where] sensor probe: ${it.probeSummary()}")
+        }
+    }
+
     /** Tear down per-session state so a fresh attempt starts clean. */
     private suspend fun resetForReconnect() {
         protocolEngine = null
         inBandTls = null
+        // Log the per-session summaries BEFORE clearing the channel references:
+        // onDestroy reads videoChannel/sensorChannel for its TEARDOWN lines, and
+        // this runs first — so previously those lines were silently skipped
+        // (channels were already null). See docs §6.1.
+        logSessionSummaries("pre-reconnect")
         videoChannel?.stop()
         audioOutputChannel?.stop()
         audioInputChannel?.stop()
@@ -297,8 +350,10 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         logW("TEARDOWN lastInbound ch=$lastInboundChannel type=0x${lastInboundType.toString(16)} " +
             "framesSentAtLastInbound=$framesSentAtLastInbound")
         logW("TEARDOWN inbound[$inb] acksVideo[$acks]")
-        // Video budget: frames/bytes the HU accepted vs. how long it lasted.
-        videoChannel?.let { logW("TEARDOWN video budget: ${it.budgetSummary()}") }
+        // Video budget + sensor probe summary. Note these may already have been
+        // emitted by resetForReconnect() if the session ended via the reconnect
+        // path; logSessionSummaries() tolerates being called twice.
+        logSessionSummaries("teardown")
         logW("Service destroying. Frames sent=$framesSent received=$framesReceived")
         FileLogger.close()
         scope.cancel()
@@ -329,6 +384,11 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             val activeTransport: Transport = try {
                 logW("Looking for USB accessory...")
                 val usbTransport = UsbAoaTransport(this)
+                // Assign BEFORE connect(): connect() can block (accept/read), and the
+                // watchdog needs a non-null `transport` to close it and unblock. If we
+                // assign afterwards the watchdog's disconnect is a no-op and connect()
+                // can block for minutes (12 min observed 2026-10-19).
+                transport = usbTransport
                 logW("Connecting to USB accessory...")
                 usbTransport.connect()
                 logW("USB connected successfully")
@@ -340,6 +400,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 try {
                     logW("No USB, trying TCP client to localhost:5000 (openauto)...")
                     val tcpClient = TcpTransport("127.0.0.1", 5000)
+                    transport = tcpClient // assign before connect() — see above
                     tcpClient.connect()
                     logW("Connected to openauto via TCP")
                     ServiceState.connectionState.value = ServiceState.ConnectionState.CONNECTING
@@ -348,6 +409,7 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
                 } catch (e2: Exception) {
                     logW("No openauto, starting TCP server on port 5277 for DHU...")
                     val tcpTransport = org.openandroidauto.transport.TcpServerTransport(5277)
+                    transport = tcpTransport // assign before connect() — see above
                     tcpTransport.connect()
                     logW("DHU connected via TCP")
                     tcpTransport
@@ -429,7 +491,15 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // propagate cancellation (watchdog/teardown), not a failure
         } catch (e: Exception) {
+            // connect() may have failed after assigning `transport`; drop the stale
+            // reference so the next attempt/teardown starts clean.
+            val stale = transport
+            transport = null
+            if (stale != null) {
+                try { withTimeoutOrNull(1000) { stale.disconnect() } } catch (_: Exception) {}
+            }
             Log.e(TAG, "Session failed: ${e.message}", e)
+            FileLogger.log(TAG, "Session failed: ${e.message}")
             updateNotification("Error: ${e.message}")
             signalDisconnected("session failed: ${e.message}")
             // Return to sessionWithReconnect, which decides whether to retry.
@@ -450,12 +520,18 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
 
             framesReceived++
             val pos = buffer.position()
+            // Log the whole read, not just the first 32 bytes. Truncating here hid
+            // the fact that one read can contain MULTIPLE frames (e.g. a 125-byte
+            // read carrying both a 29- and a 30-byte message), which made an
+            // earlier framing investigation impossible to complete from the log.
+            // Capped at 256 bytes to bound the log; the cap is stated explicitly.
             val rawHex = StringBuilder()
-            for (i in 0 until minOf(pos, 32)) { rawHex.append(String.format("%02x ", buffer[i])) }
+            for (i in 0 until minOf(pos, RAW_LOG_BYTES)) { rawHex.append(String.format("%02x ", buffer[i])) }
+            val truncNote = if (pos > RAW_LOG_BYTES) " (truncated, showing $RAW_LOG_BYTES)" else ""
             // Log the silence gap before this read: if the HU was quiet, this shows how long.
             val gap = inboundSilenceMs()
             val gapNote = if (lastInboundMs != 0L) " [gap=${gap}ms]" else ""
-            logW("RAW ← $pos bytes$gapNote: $rawHex")
+            logW("RAW ← $pos bytes$gapNote$truncNote: $rawHex")
             markInbound(-1, -1) // updated with real channel/type once decoded
 
             buffer.flip()
@@ -522,7 +598,16 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
         val isTlsRecord = msg.payload.size > 5 && msg.payload[0].toInt() and 0xFF == 0x17 && msg.payload[1].toInt() and 0xFF == 0x03
         val payload = if (tls != null && tls.isHandshakeComplete && (isEncryptedFrame || isTlsRecord)) {
             val decrypted = tls.decrypt(msg.payload)
-            if (decrypted.size <= 10) {
+            // Log EVERY decrypted payload in full (capped). Previously only those
+            // <=10 bytes were printed, which hid exactly the messages under
+            // investigation: the sensor messages that declare 20-38 bytes but
+            // allegedly deliver 1. Without the plaintext there is no way to tell
+            // a head-unit stub from a bug in our own slicing.
+            if (DECRYPT_LOG_ALL) {
+                val preHex = msg.payload.take(24).joinToString(" ") { String.format("%02x", it) }
+                logW("  decrypt: ${msg.payload.size}→${decrypted.size} pre=[$preHex] " +
+                    "post=[${decrypted.hex(128)}]")
+            } else if (decrypted.size <= 10) {
                 val preHex = msg.payload.take(20).joinToString(" ") { String.format("%02x", it) }
                 val postHex = decrypted.joinToString(" ") { String.format("%02x", it) }
                 logW("  decrypt: ${msg.payload.size}→${decrypted.size} pre=[$preHex] post=[$postHex]")
@@ -580,14 +665,18 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             }
             sensorChannelId -> sensorChannel?.onMessage(type, msgPayload)
             btChannelId -> {
-                // BluetoothPairingResponse or other BT messages from head unit
-                logW("BT channel message: type=0x${type.toString(16)} len=${msgPayload.size}")
+                // BluetoothPairingResponse or other BT messages from head unit.
+                // Include the payload: anything beyond a pairing response is
+                // currently unhandled, and we want to be able to decode it later.
+                logW("BT channel message: type=0x${type.toString(16)} len=${msgPayload.size} " +
+                    "payload=${msgPayload.hex(64)}")
             }
             else -> {
                 // Try matching by channel type if IDs not yet assigned
                 if (chId == 1) videoChannel?.onMessage(type, msgPayload)
                 else if (chId == 2) inputChannel?.onMessage(type, msgPayload)
-                else logW("Unrouted message ch=$chId type=0x${type.toString(16)}")
+                else logW("UNHANDLED channel ch=$chId type=0x${type.toString(16)} " +
+                    "len=${msgPayload.size} payload=${msgPayload.hex(64)}")
             }
         }
     }
@@ -811,8 +900,15 @@ class ProjectionService : Service(), ProtocolCallback, VideoChannelCallback, Inp
             sendBluetoothPairingRequest()
         }
         if (channelId == sensorChannelId) {
+            // Fresh lifecycle tracking for this session, then subscribe.
+            sensorChannel?.resetLifecycleTracking()
             // Subscribe to HU sensor data (HUIG: phone must request sensors)
             sensorChannel?.requestDefaultSensors()
+            // Optional experiment: also subscribe to every supported type, to learn
+            // what this HU actually exposes (docs §5). Off by default.
+            if (ServiceState.probeAllSensors.value) {
+                sensorChannel?.probeAllSensors()
+            }
         }
     }
 

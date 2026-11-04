@@ -4,7 +4,18 @@ An open-source implementation of the Android Auto **phone-side** app. This app r
 
 ## ⚠️ WORK IN PROGRESS
 
-This project is in early development. The protocol handshake and video projection are working with a real head unit. The phone screen is successfully displayed on the car's head unit for several seconds before disconnecting (video stability is being improved).
+This project is in early development. The protocol handshake, video projection, touch input and vehicle-data decoding all work against a real head unit. Connection stability is much improved (runs of 15–72 minutes recorded) but not yet proven — the head unit has been observed cutting USB power (VBUS) mid-session. See the docs below.
+
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [`docs/protocol.md`](docs/protocol.md) | **AAP reference for this implementation.** Framing, TLS, channel model, per-channel message catalogue, the sensor pub-sub model and its correlation hazard, video/focus/flow-control rules, and a summary of **known ambiguities and traps**. Start here. |
+| [`docs/connection-stability.md`](docs/connection-stability.md) | **Connection reliability.** Protocol requirements the HU enforces; the two distinct disconnect signatures (HU VBUS cut vs. cable pull) and how to tell them apart; evidence log; ruled-out causes; reconnect/restart behaviour; instrumentation and log reference; sensors & telemetry; external research; and the prioritised TODO. |
+| [`docs/research.md`](docs/research.md) | **Ecosystem survey.** History of Android Auto reverse-engineering, comparison of existing OSS projects (headunit-revived, aasdk, openauto, AACS…), head-unit-side vs phone-side, TLS/auth analysis, and APK reverse-engineering notes. |
+| [`AGENT.md`](AGENT.md) | Guidelines for AI agents / contributors working in this repo. |
+
+Keep these current — see [`AGENT.md`](AGENT.md).
 
 ## Features
 
@@ -31,9 +42,10 @@ This project is in early development. The protocol handshake and video projectio
 - [x] Zero-based timestamps in microseconds
 - [x] SPS/PPS prepended to keyframes (Annex B format)
 - [x] Flow control (max_unacked tracking, backpressure)
-- [x] Frame pacing (consistent 33ms intervals)
-- [x] Stable long-running video (30+ minutes confirmed)
-- [ ] Resolution negotiation from head unit's service discovery
+- [x] Event-driven frames (only on UI change + 2s idle frame, per HUIG)
+- [x] Video focus handling — pause frames when HU takes the screen (fixes reversing-camera corruption)
+- [ ] Video config negotiation — currently non-compliant; see docs §1.7
+- [ ] Stable long-running video — event-driven builds reached 15 min; needs an unattended longer run
 - [ ] Adaptive bitrate based on connection quality
 
 ### Touch Input
@@ -60,26 +72,33 @@ This project is in early development. The protocol handshake and video projectio
 - [x] Sensor start request/response handling
 - [x] Night mode data parsing and sending
 - [x] Driving status data parsing and sending
-- [ ] GPS location forwarding
-- [ ] Compass heading
-- [ ] Car speed
-- [ ] RPM
-- [ ] Odometer (total + trip mileage)
-- [ ] Fuel level and range
-- [ ] Parking brake state
-- [ ] Gear position (P/R/N/D/1-10)
-- [ ] OBD-II diagnostics
-- [ ] Environment (temperature, pressure, rain)
-- [ ] HVAC (target/current temperature)
-- [ ] Dead reckoning
-- [ ] Passenger presence
-- [ ] Door state (hood, boot, individual doors)
-- [ ] Light state (headlights, indicators, hazards)
-- [ ] Tire pressure
-- [ ] Accelerometer (3-axis)
-- [ ] Gyroscope (3-axis)
-- [ ] GPS satellite data
-- [ ] Respond to head unit sensor requests proactively
+- [x] GPS location (received from HU, ~1 Hz)
+- [x] Car speed (received from HU, ~1 Hz)
+- [x] Sensor capability probe — subscribe to all types and report accept/reject
+- [x] Decode driving-status bitmask (NO_VIDEO/NO_KEYBOARD/…)
+- [x] Vehicle-data UI showing all decoded values + what the HU does/doesn't provide
+- [x] Parking brake state — HU provides it (0 ON/off observed)
+- [x] Accelerometer (3-axis) — HU provides it (all-zero in test)
+- [x] Gyroscope (3-axis) — HU provides it (all-zero in test)
+- [ ] Compass heading — HU **rejects**
+- [ ] RPM — HU **rejects**
+- [ ] Fuel level and range — HU **rejects**
+- [ ] Door state (hood, boot, individual doors) — HU **rejects**
+- [ ] Odometer (total + trip mileage) — HU **rejects**
+- [ ] Gear position (P/R/N/D/1-10) — HU **rejects**
+- [ ] OBD-II diagnostics — HU **rejects**
+- [ ] Environment (temperature, pressure, rain) — HU **rejects**
+- [ ] HVAC (target/current temperature) — HU **rejects**
+- [ ] Steering angle (type 14) — HU **rejects**
+- [ ] Passenger presence — HU **rejects**
+- [ ] Light state (headlights, indicators, hazards) — HU **rejects**
+- [ ] Tire pressure — no payload field in the proto (cannot arrive)
+- [ ] GPS satellite data — no payload field in the proto (cannot arrive)
+
+> "HU accepts/rejects" = this head unit's verified `SENSOR_START_RESPONSE` from a
+> clean 2026-10-24 run (27 requests / 27 responses, zero unmatched). An earlier
+> 2026-10-23 table was invalid — responses were mis-correlated and shifted by
+> three. See `docs/connection-stability.md` §5.
 
 ### Video (additional)
 - [ ] Resolution negotiation from head unit's service discovery
@@ -143,28 +162,34 @@ USB Plug-in → MainActivity → ProjectionService
 ## Known Bugs
 
 - **Channel assignment assumes order** — We assign the first `av_channel` in SERVICE_DISCOVERY_RESPONSE as video and the second as audio. This works with the car head unit (channel 1 = video) but fails with openauto (channel 4 = audio, not video). Fix: parse the `stream_type` field inside `av_channel` to distinguish `VIDEO(3)` from `AUDIO(1)`.
-- **Video stability** — **OPEN.** The AUTH_COMPLETE fix (2026-05-30) resolved the *idle* disconnect, but video streaming still causes the HU to abruptly stop all communication and then **physically drop USB power (VBUS)** after a variable 9-240s. Disconnect is inconsistent (5 KB/s fails, 170 KB/s lasts longer), so it is not bandwidth or flow control. Full evidence, ruled-out causes and open hypotheses in [`docs/connection-stability.md`](docs/connection-stability.md) (formerly `bugfix.md`).
+- **Video stability** — **IMPROVED, not yet proven fixed.** With event-driven video (2026-10-19) no HU-initiated drop has been observed; runs reached 15.3 and 12.7 min, all healthy until the cable was pulled by hand. Earlier builds dropped after 9 s-5 min and the HU physically cut USB power (VBUS). Still needs one unattended 30+ min run. Full evidence, detection method, ruled-out causes and TODO in [`docs/connection-stability.md`](docs/connection-stability.md).
+- **Reversing-camera corruption** — **FIXED 2026-10-19.** We ignored the HU's `VIDEO_FOCUS_NOTIFICATION UNFOCUSED`, so we kept streaming H.264 into the display while the HU showed the reversing camera, corrupting it. Frames are now suppressed while the HU holds focus. See docs §1.8.
+- **Video config negotiation non-compliant** — We claim a config index we don't advertise in SETUP, and put a config index where the proto expects a session id in START. Tolerated by this HU but wrong. See docs §1.7.
 - **Duplicate device listing on head unit** — The head unit's smartphone page shows our app as two separate entries (one for Android Auto, one for Bluetooth) instead of a single entry with both capabilities. This is caused by Android 12+ blocking access to the real Bluetooth MAC address (returns `02:00:00:00:00:00`). Workaround: write the real address to a config file via `adb shell "echo $(adb shell settings get secure bluetooth_address) > /sdcard/Android/data/org.openandroidauto/files/bt_address.txt"`. Need a UI settings screen to let the user enter their BT MAC manually.
 - **Voice assistant button not handled** — When the driver presses the voice/assistant button on the head unit, we receive a VOICE_SESSION_REQUEST and attempt to launch a voice assistant (Dicio or system default). However, the launched assistant doesn't receive audio from the head unit's microphone yet.
 
 ### Video Stability Test Results
 
-Test pattern (color bars) at 800x480, I-frame interval 1 second:
+> **Superseded.** The table that used to be here concluded "head unit USB receive
+> buffer overflows with sustained high throughput". That was **disproven**: 5 KB/s
+> failed while 170 KB/s lasted longer, the HU was shown to physically drop VBUS
+> (kernel `vbus:0`), and the official app runs indefinitely on the same cable.
 
-| FPS | Bitrate | Fragment | Duration | Frames | Status |
-|-----|---------|----------|----------|--------|--------|
-| 30 | 2Mbps | No | ~3s | ~90 | ❌ Too fast |
-| 15 | 2Mbps | No | ~33s | ~500 | ⚠️ Better |
-| 10 | 2Mbps | No | ~93s | ~930 | ⚠️ Good |
-| 30 | 2Mbps | Yes (2KB) | 5-25s | 150-750 | ⚠️ Variable |
-| 30 | 500Kbps | Yes (2KB) | ~54s | ~1691 | ⚠️ Better |
-| 15 | 250Kbps | Yes (2KB) | ~67s+ | 1000+ | ⚠️ Good |
-| 30 | 250Kbps | Yes (2KB), I=5s | ~20s | ~600 | ❌ Worse with long I-frame |
-| 15 | 250Kbps | No | ~13s | ~200 | ❌ Fragmentation helped here |
+Current best results (event-driven video, 2026-10-19):
 
-Root cause: Head unit USB receive buffer overflows with sustained high throughput. Lower data rate = longer connection.
+| Build | Duration | End |
+|---|---|---|
+| Constant ~15 fps (old) | 9 s - 5 min | HU dropped USB power |
+| Constant ~15 fps (old best) | 9 m 32 s | HU drop |
+| **Event-driven ~0.9 fps** | **15.3 min** | cable pulled by hand (HU healthy) |
+| **Event-driven ~0.9 fps** | **12.7 min** | cable pulled by hand (HU healthy) |
 
-**Best confirmed config:** 10fps, 2Mbps, no fragmentation = 93 seconds. Fragment-before-encrypt implementation is broken (head unit can't reassemble) — needs further investigation.
+Event-driven video cut throughput ~10× (14.8 → 0.9 fps, 5.8 → 0.5 KB/s) and no
+HU-initiated drop has been seen since. **Not yet proven** — every run so far was
+ended manually; an unattended 30+ min run is the outstanding test.
+
+Full analysis, the A-vs-B disconnect detection method, ruled-out causes and the
+TODO list are in [`docs/connection-stability.md`](docs/connection-stability.md).
 
 ## Building
 

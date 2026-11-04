@@ -31,9 +31,46 @@ class SensorChannelTest {
     }
 
     @Test
-    fun `requestDefaultSensors sends SENSOR_START_REQUEST for 3 sensors`() {
+    fun `lifecycle summary reports requested, accepted and delivered separately`() {
+        // The point of this summary: an "OK" on subscribe does NOT mean data
+        // arrives. It must distinguish the two.
+        channel.resetLifecycleTracking() // ServiceState is a process-wide singleton
+        channel.requestSensors(listOf(SensorType.SPEED, SensorType.RPM))
+        val summary = channel.lifecycleSummary()
+        assertTrue("should list the 2 requested types: $summary",
+            summary.contains("requested=[3:CAR_SPEED,4:RPM]"))
+        // Nothing has responded or delivered yet.
+        assertTrue("accepted should be empty: $summary", summary.contains("accepted=[]"))
+        assertTrue("delivered should be empty: $summary", summary.contains("deliveredData=[]"))
+    }
+
+    @Test
+    fun `lifecycle summary flags suspect correlation when responses do not match requests`() {
+        // Regression guard for the 2026-10-23 failure: 3 responses went unmatched
+        // and every per-type verdict shifted, producing a wrong capability table
+        // that then drove a wrong code change. The summary must say so.
+        channel.resetLifecycleTracking()
+        channel.requestSensors(listOf(SensorType.SPEED, SensorType.RPM))
+
+        // Drain the two real responses, then an extra one with nothing outstanding.
+        channel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+        channel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+        channel.onMessage(SensorMessageType.SENSOR_START_RESPONSE, byteArrayOf(0x08, 0x00))
+
+        val suspect = channel.lifecycleSummary()
+        assertTrue("unmatched responses must make correlation SUSPECT: $suspect",
+            suspect.contains("correlation=SUSPECT"))
+        assertTrue("should count the unmatched response: $suspect",
+            suspect.contains("unmatched="))
+    }
+
+    @Test
+    fun `requestDefaultSensors sends SENSOR_START_REQUEST for all supported sensors`() {
+        // 7 types: the 3 protocol-required plus the 4 this HU verified as
+        // accepted AND delivering on 2026-10-24 (clean 27/27 correlated run).
+        // An earlier 8-type version was based on mis-correlated 2026-10-23 data.
         channel.requestDefaultSensors()
-        assertEquals(3, cb.messages.size)
+        assertEquals(7, cb.messages.size)
         assertTrue(cb.messageTypes().all { it == SensorMessageType.SENSOR_START_REQUEST })
     }
 

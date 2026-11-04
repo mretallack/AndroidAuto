@@ -1,6 +1,8 @@
 package org.openandroidauto.navigation
 
 import org.openandroidauto.channel.VideoChannelCallback
+import org.openandroidauto.util.FileLogger
+import org.openandroidauto.util.hex
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -36,11 +38,14 @@ class NavigationChannel(
     private val channelId: UByte,
     private val callback: VideoChannelCallback
 ) {
+    private val TAG = "AANav"
     private var isActive = false
 
     fun onMessage(messageType: Int, payload: ByteArray) {
-        // Head unit doesn't typically send nav messages to phone
-        // This channel is phone→head unit
+        // This channel is normally phone→head unit, so inbound is unexpected —
+        // but log it rather than discard, in case the HU does send something.
+        FileLogger.w(TAG, "UNHANDLED nav message type=0x${messageType.toString(16)} " +
+            "len=${payload.size} payload=${payload.hex(64)}")
     }
 
     /**

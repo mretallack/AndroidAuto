@@ -1,5 +1,9 @@
 # Android Auto Open Source Research
 
+> **See also:** [`protocol.md`](protocol.md) for the protocol reference and
+> [`connection-stability.md`](connection-stability.md) for reliability findings.
+> This document surveys the wider ecosystem.
+
 ## Summary
 
 The Android Auto protocol has been reverse-engineered by the community. Multiple working open-source implementations exist, ranging from Android apps to Raspberry Pi solutions. The most active and feature-complete project is **headunit-revived**.
